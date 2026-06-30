@@ -1,4 +1,4 @@
-use signal_space::{parse_document, round_trip, validate_document, SPEC_VERSION};
+use signal_space::{SPEC_VERSION, parse_document, round_trip, validate_document};
 
 #[test]
 fn validates_agent_doc_fixture() {
@@ -9,7 +9,10 @@ fn validates_agent_doc_fixture() {
 
     validate_document(&document).expect("fixture validates");
     assert_eq!(document.schema_version, SPEC_VERSION);
-    assert_eq!(round_trip(&document).unwrap().graph.id, "agent_doc.supervisor");
+    assert_eq!(
+        round_trip(&document).unwrap().graph.id,
+        "agent_doc.supervisor"
+    );
 }
 
 #[test]
@@ -20,11 +23,11 @@ fn validates_patchboard_fixture() {
     .expect("fixture parses");
 
     validate_document(&document).expect("fixture validates");
-    assert!(document
-        .graph
-        .nodes
-        .iter()
-        .any(|node| node.allowed_modules.iter().any(|module| module == "trainable_model.lifecycle")));
+    assert!(document.graph.nodes.iter().any(|node| {
+        node.allowed_modules
+            .iter()
+            .any(|module| module == "trainable_model.lifecycle")
+    }));
 }
 
 #[test]

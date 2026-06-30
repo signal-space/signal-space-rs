@@ -14,7 +14,7 @@ default = []
 lazily-runtime = ["dep:lazily"]
 
 [dependencies]
-lazily = { git = "https://github.com/lazily-hub/lazily-rs", package = "lazily", optional = true }
+lazily = { git = "https://github.com/lazily-hub/lazily-rs", package = "lazily", features = ["ipc"], optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

@@ -32,13 +32,13 @@ pub enum NodeFamily {
     Output,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalSpaceDocument {
     pub schema_version: String,
     pub graph: SignalGraph,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalGraph {
     pub id: String,
     pub name: Option<String>,
@@ -55,7 +55,7 @@ pub struct SignalGraph {
     pub snapshot: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalNode {
     pub id: String,
     pub family: NodeFamily,
@@ -73,14 +73,14 @@ pub struct SignalNode {
     pub provenance: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodeState {
     pub summary: String,
     #[serde(default)]
     pub fields: Vec<StateField>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StateField {
     pub id: String,
     pub state_class: StateClass,
@@ -90,7 +90,7 @@ pub struct StateField {
     pub value: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalEdge {
     pub id: String,
     #[serde(rename = "from")]
@@ -103,7 +103,7 @@ pub struct SignalEdge {
     pub state_fields: Vec<StateField>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SignalEvent {
     pub id: String,
     pub kind: String,
@@ -115,7 +115,7 @@ pub struct SignalEvent {
     pub evidence: Vec<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TimelineEvent {
     pub id: String,
     pub kind: String,
@@ -131,7 +131,7 @@ pub struct TimelineEvent {
     pub decision_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DecisionEnvelope {
     pub id: String,
     pub mode: String,
@@ -149,7 +149,7 @@ pub struct DecisionEnvelope {
     pub authority: AuthorityLevel,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurfaceIntent {
     pub id: String,
     #[serde(rename = "type")]
@@ -166,13 +166,13 @@ pub struct SurfaceIntent {
     pub idempotency_key: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Target {
     pub kind: String,
     pub id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Authority {
     pub default: AuthorityLevel,
     #[serde(default)]
@@ -183,7 +183,7 @@ pub struct Authority {
     pub requires_approval: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntentModule {
     pub id: String,
     pub version: String,
@@ -193,7 +193,7 @@ pub struct IntentModule {
     pub intents: Vec<IntentSchema>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IntentSchema {
     #[serde(rename = "type")]
     pub intent_type: String,
@@ -241,7 +241,10 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
     let mut node_ids = HashSet::new();
     for node in &document.graph.nodes {
         if !node_ids.insert(node.id.as_str()) {
-            return Err(ValidationError::new(format!("duplicate node id: {}", node.id)));
+            return Err(ValidationError::new(format!(
+                "duplicate node id: {}",
+                node.id
+            )));
         }
         for field in &node.state.fields {
             if field.derived && field.writable {
@@ -274,7 +277,10 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
     let mut edge_ids = HashSet::new();
     for edge in &document.graph.edges {
         if !edge_ids.insert(edge.id.as_str()) {
-            return Err(ValidationError::new(format!("duplicate edge id: {}", edge.id)));
+            return Err(ValidationError::new(format!(
+                "duplicate edge id: {}",
+                edge.id
+            )));
         }
         if !node_ids.contains(edge.from_node.as_str()) || !node_ids.contains(edge.to_node.as_str())
         {
@@ -288,6 +294,221 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
     Ok(())
 }
 
-pub fn round_trip(document: &SignalSpaceDocument) -> Result<SignalSpaceDocument, serde_json::Error> {
+pub fn round_trip(
+    document: &SignalSpaceDocument,
+) -> Result<SignalSpaceDocument, serde_json::Error> {
     serde_json::from_value(serde_json::to_value(document)?)
+}
+
+#[cfg(feature = "lazily-runtime")]
+pub mod runtime {
+    use lazily::{
+        CellHandle, Context, Delta, DeltaOp, EdgeSnapshot, IpcValue, NodeId, NodeSnapshot,
+        SignalHandle, Snapshot,
+    };
+
+    use crate::{
+        SignalGraph, SignalNode, StateClass, StateField, TimelineEvent, validate_document,
+    };
+
+    /// Summary row for an inspector panel derived from graph state.
+    ///
+    /// This is intentionally derived-only. Mutating node state must go through
+    /// the graph cell and then the owning adapter's authority boundary.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct InspectorSummary {
+        pub node_id: String,
+        pub family: String,
+        pub state_summary: String,
+        pub authority: String,
+        pub allowed_intents: Vec<String>,
+        pub writable_fields: Vec<String>,
+        pub derived_fields: Vec<String>,
+        pub recent_event_count: usize,
+    }
+
+    /// Read-only mirror projection over lazily Snapshot/Delta IPC types.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct MirrorExport {
+        pub snapshot: Snapshot,
+        pub delta: Delta,
+    }
+
+    /// Lazily-backed local runtime for a Signal Space graph.
+    ///
+    /// The graph itself is the only writable cell. Inspector summaries and
+    /// mirror exports are eager signals derived from that cell.
+    pub struct SignalSpaceRuntime {
+        ctx: Context,
+        graph: CellHandle<SignalGraph>,
+        inspectors: SignalHandle<Vec<InspectorSummary>>,
+        mirror: SignalHandle<MirrorExport>,
+    }
+
+    impl SignalSpaceRuntime {
+        pub fn new(graph: SignalGraph) -> Self {
+            let ctx = Context::new();
+            let graph_cell = ctx.cell(graph);
+            let inspectors_cell = graph_cell;
+            let inspectors =
+                ctx.signal(move |ctx| inspector_summaries(ctx.get_cell(&inspectors_cell)));
+            let mirror_cell = graph_cell;
+            let mirror = ctx.signal(move |ctx| mirror_export(ctx.get_cell(&mirror_cell)));
+            Self {
+                ctx,
+                graph: graph_cell,
+                inspectors,
+                mirror,
+            }
+        }
+
+        pub fn graph(&self) -> SignalGraph {
+            self.ctx.get_cell(&self.graph)
+        }
+
+        pub fn set_graph(&self, graph: SignalGraph) {
+            self.graph.set(&self.ctx, graph);
+        }
+
+        pub fn update_graph(&self, update: impl FnOnce(&mut SignalGraph)) {
+            let mut graph = self.graph();
+            update(&mut graph);
+            self.set_graph(graph);
+        }
+
+        pub fn inspectors(&self) -> Vec<InspectorSummary> {
+            self.inspectors.get(&self.ctx)
+        }
+
+        pub fn mirror_export(&self) -> MirrorExport {
+            self.mirror.get(&self.ctx)
+        }
+    }
+
+    pub fn inspector_summaries(graph: SignalGraph) -> Vec<InspectorSummary> {
+        graph.nodes.iter().map(inspector_summary).collect()
+    }
+
+    pub fn inspector_summary(node: &SignalNode) -> InspectorSummary {
+        InspectorSummary {
+            node_id: node.id.clone(),
+            family: format!("{:?}", node.family).to_ascii_lowercase(),
+            state_summary: node.state.summary.clone(),
+            authority: format!("{:?}", node.authority.default).to_ascii_lowercase(),
+            allowed_intents: node.allowed_intents.clone(),
+            writable_fields: fields_by_kind(&node.state.fields, true),
+            derived_fields: fields_by_kind(&node.state.fields, false),
+            recent_event_count: node.recent_events.len(),
+        }
+    }
+
+    fn fields_by_kind(fields: &[StateField], writable: bool) -> Vec<String> {
+        fields
+            .iter()
+            .filter(|field| {
+                if writable {
+                    field.writable && !field.derived
+                } else {
+                    field.derived
+                }
+            })
+            .map(|field| field.id.clone())
+            .collect()
+    }
+
+    pub fn mirror_export(graph: SignalGraph) -> MirrorExport {
+        let snapshot = snapshot_for_graph(&graph);
+        let delta = Delta::next(0, delta_ops_for_graph(&graph));
+        MirrorExport { snapshot, delta }
+    }
+
+    pub fn snapshot_for_graph(graph: &SignalGraph) -> Snapshot {
+        let mut nodes = Vec::new();
+        nodes.push(node_payload(1, "signal-space.graph", graph));
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            nodes.push(node_payload(node_wire_id(idx), "signal-space.node", node));
+        }
+        for (idx, event) in graph.timeline.iter().enumerate() {
+            nodes.push(node_payload(
+                event_wire_id(graph.nodes.len(), idx),
+                "signal-space.timeline_event",
+                event,
+            ));
+        }
+
+        let edges = graph
+            .edges
+            .iter()
+            .filter_map(|edge| {
+                let dependent = graph
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == edge.to_node)
+                    .map(node_wire_id)?;
+                let dependency = graph
+                    .nodes
+                    .iter()
+                    .position(|node| node.id == edge.from_node)
+                    .map(node_wire_id)?;
+                Some(EdgeSnapshot::new(NodeId(dependent), NodeId(dependency)))
+            })
+            .collect();
+
+        Snapshot::new(0, nodes, edges, vec![NodeId(1)])
+    }
+
+    pub fn delta_ops_for_graph(graph: &SignalGraph) -> Vec<DeltaOp> {
+        let mut ops = Vec::new();
+        ops.push(DeltaOp::SlotValue {
+            node: NodeId(1),
+            payload: to_ipc_value(graph),
+        });
+        for (idx, node) in graph.nodes.iter().enumerate() {
+            ops.push(DeltaOp::SlotValue {
+                node: NodeId(node_wire_id(idx)),
+                payload: to_ipc_value(node),
+            });
+        }
+        for (idx, event) in graph.timeline.iter().enumerate() {
+            ops.push(DeltaOp::SlotValue {
+                node: NodeId(event_wire_id(graph.nodes.len(), idx)),
+                payload: to_ipc_value(event),
+            });
+        }
+        ops
+    }
+
+    pub fn validate_runtime_document(
+        document: &crate::SignalSpaceDocument,
+    ) -> Result<(), crate::ValidationError> {
+        validate_document(document)
+    }
+
+    fn node_wire_id(idx: usize) -> u64 {
+        2 + idx as u64
+    }
+
+    fn event_wire_id(node_count: usize, idx: usize) -> u64 {
+        2 + node_count as u64 + idx as u64
+    }
+
+    fn node_payload<T: serde::Serialize>(id: u64, type_tag: &str, value: &T) -> NodeSnapshot {
+        NodeSnapshot::payload(NodeId(id), type_tag, to_payload(value))
+    }
+
+    fn to_ipc_value<T: serde::Serialize>(value: &T) -> IpcValue {
+        IpcValue::Inline(to_payload(value))
+    }
+
+    fn to_payload<T: serde::Serialize>(value: &T) -> Vec<u8> {
+        serde_json::to_vec(value).expect("Signal Space mirror payload serializes")
+    }
+
+    pub fn timeline_by_class(graph: &SignalGraph, state_class: StateClass) -> Vec<&TimelineEvent> {
+        graph
+            .timeline
+            .iter()
+            .filter(|event| event.state_class == state_class)
+            .collect()
+    }
 }
