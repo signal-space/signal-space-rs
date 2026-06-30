@@ -1,4 +1,4 @@
-use signal_space::{SPEC_VERSION, parse_document, round_trip, validate_document};
+use signal_space::{AuthorityLevel, SPEC_VERSION, parse_document, round_trip, validate_document};
 
 #[test]
 fn validates_agent_doc_fixture() {
@@ -40,4 +40,21 @@ fn rejects_unknown_edge_endpoint() {
 
     let error = validate_document(&document).expect_err("invalid edge rejected");
     assert!(error.to_string().contains("unknown endpoint"));
+}
+
+#[test]
+fn rejects_silent_direct_authority_escalation() {
+    let mut document = parse_document(include_str!(
+        "../../signal-space-spec/fixtures/agent_doc_supervisor.json"
+    ))
+    .expect("fixture parses");
+    let intent = &mut document.graph.nodes[2]
+        .decision
+        .as_mut()
+        .expect("decision node")
+        .proposed_intents[0];
+    intent.authority = AuthorityLevel::Direct;
+
+    let error = validate_document(&document).expect_err("invalid authority rejected");
+    assert!(error.to_string().contains("direct authority"));
 }

@@ -272,6 +272,18 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
                 )));
             }
         }
+        if let Some(decision) = &node.decision {
+            for intent in &decision.proposed_intents {
+                if intent.authority == AuthorityLevel::Direct
+                    && !grants_direct_authority(node, decision, intent)
+                {
+                    return Err(ValidationError::new(format!(
+                        "proposed intent upgrades to direct authority: {}",
+                        intent.id
+                    )));
+                }
+            }
+        }
     }
 
     let mut edge_ids = HashSet::new();
@@ -292,6 +304,20 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
     }
 
     Ok(())
+}
+
+fn grants_direct_authority(
+    node: &SignalNode,
+    decision: &DecisionEnvelope,
+    intent: &SurfaceIntent,
+) -> bool {
+    node.authority.default == AuthorityLevel::Direct
+        || node
+            .authority
+            .by_intent
+            .get(&intent.intent_type)
+            .is_some_and(|level| level == &AuthorityLevel::Direct)
+        || decision.authority == AuthorityLevel::Direct
 }
 
 pub fn round_trip(
