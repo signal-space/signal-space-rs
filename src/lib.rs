@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-pub const SPEC_VERSION: &str = "0.1.0";
+pub const SPEC_VERSION: &str = "0.2.0";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,6 +70,11 @@ pub struct SignalNode {
     #[serde(default)]
     pub allowed_modules: Vec<String>,
     pub allowed_intents: Vec<String>,
+    /// Optional declarative state machine (added in `0.2.0`). When present, an
+    /// adapter SHOULD route transitions through [`StateChart::transition`] and
+    /// keep `current` in sync with its live runtime state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_chart: Option<StateChart>,
     pub provenance: Option<serde_json::Value>,
 }
 
@@ -205,6 +210,60 @@ pub struct IntentSchema {
     pub description: Option<String>,
 }
 
+/// A declarative finite state machine mirroring lazily's reactive
+/// `StateMachine<S, E>`.
+///
+/// Added in schema `0.2.0` as an optional field on [`SignalNode`]. The chart
+/// declares the enumeration of valid states, the entry state, an optional live
+/// state, and the transition function expressed as `{from, event, to}` triples.
+/// The owning adapter remains responsible for applying or rejecting any
+/// transition at its authority boundary; a binding that targets only `0.1.0`
+/// MAY ignore the field entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateChart {
+    pub states: Vec<String>,
+    pub initial: String,
+    /// Live state of the machine, mirroring lazily's `state()` getter. Absent
+    /// when the live state is carried by `state.fields` instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<String>,
+    pub transitions: Vec<StateTransition>,
+}
+
+/// A single [`StateChart`] edge: the machine moves from `from` to `to` when it
+/// observes `event`. The `event` conventionally matches an intent type
+/// advertised by the graph so a `SurfaceIntent` doubles as a state-machine
+/// event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StateTransition {
+    pub from: String,
+    pub event: String,
+    pub to: String,
+}
+
+impl StateChart {
+    /// Returns the destination state for `event` fired from `from`, or `None`
+    /// when no transition matches. Mirrors lazily's `StateMachine::on` returning
+    /// `Option<S>`; a `None` result is not an error, it merely means the event
+    /// is undefined for the current state.
+    pub fn transition(&self, from: &str, event: &str) -> Option<&str> {
+        self.transitions
+            .iter()
+            .find(|t| t.from == from && t.event == event)
+            .map(|t| t.to.as_str())
+    }
+
+    /// The effective live state: `current` when set, otherwise `initial`.
+    pub fn effective_current(&self) -> &str {
+        self.current.as_deref().unwrap_or(&self.initial)
+    }
+
+    /// Whether `state` is one of the declared `states`.
+    pub fn contains_state(&self, state: &str) -> bool {
+        self.states.iter().any(|s| s == state)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValidationError {
     pub message: String,
@@ -284,6 +343,9 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
                 }
             }
         }
+        if let Some(chart) = &node.state_chart {
+            validate_state_chart(node.id.as_str(), chart)?;
+        }
     }
 
     let mut edge_ids = HashSet::new();
@@ -318,6 +380,44 @@ fn grants_direct_authority(
             .get(&intent.intent_type)
             .is_some_and(|level| level == &AuthorityLevel::Direct)
         || decision.authority == AuthorityLevel::Direct
+}
+
+/// Validate a node's optional `StateChart`: the initial state and every
+/// transition endpoint must be declared in `states`, and the live `current`
+/// (when present) must likewise be a known state. The transition function is
+/// otherwise free-form so an adapter can model idempotent or competing events
+/// without contradicting the schema.
+fn validate_state_chart(node_id: &str, chart: &StateChart) -> Result<(), ValidationError> {
+    if chart.states.is_empty() {
+        return Err(ValidationError::new(format!(
+            "state_chart has no states: {node_id}"
+        )));
+    }
+    if !chart.contains_state(&chart.initial) {
+        return Err(ValidationError::new(format!(
+            "state_chart initial state not in states: {node_id}"
+        )));
+    }
+    if let Some(current) = &chart.current
+        && !chart.contains_state(current)
+    {
+        return Err(ValidationError::new(format!(
+            "state_chart current state not in states: {node_id}"
+        )));
+    }
+    for transition in &chart.transitions {
+        if !chart.contains_state(&transition.from) {
+            return Err(ValidationError::new(format!(
+                "state_chart transition 'from' not in states: {node_id}"
+            )));
+        }
+        if !chart.contains_state(&transition.to) {
+            return Err(ValidationError::new(format!(
+                "state_chart transition 'to' not in states: {node_id}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub fn round_trip(
