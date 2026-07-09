@@ -1,0 +1,542 @@
+{
+  "schema_version": "0.3.0",
+  "graph": {
+    "id": "patchboard.attention_router",
+    "name": "Patchboard attention router",
+    "description": "Realtime signal graph with feature window, trainable model, approval gate, and agent review.",
+    "source": "patchboard",
+    "authority": {
+      "default": "gated",
+      "boundary": "runtime",
+      "owner": "patchboard",
+      "requires_approval": true
+    },
+    "nodes": [
+      {
+        "id": "source.editor",
+        "family": "source",
+        "mode": "editor",
+        "label": "Editor events",
+        "ports": [
+          {
+            "id": "events",
+            "name": "Editor events",
+            "direction": "out",
+            "dtype": "event"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "webhook",
+          "endpoint": "/hooks/editor",
+          "format": "json",
+          "auth_ref": "editor_hook"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Recent editor/git/test observations",
+          "fields": [
+            {
+              "id": "editor.events_per_minute",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 6
+            }
+          ]
+        },
+        "allowed_modules": ["navigation.inspect", "runtime.mirroring"],
+        "allowed_intents": ["open_inspector", "request_snapshot"],
+        "recent_events": [],
+        "explanation": {
+          "source": "local editor stream"
+        }
+      },
+      {
+        "id": "window.route_features",
+        "family": "memory",
+        "mode": "rolling_window",
+        "label": "Route features",
+        "ports": [
+          {
+            "id": "events",
+            "name": "Events in",
+            "direction": "in",
+            "dtype": "event",
+            "required": true
+          },
+          {
+            "id": "features",
+            "name": "Feature window",
+            "direction": "out",
+            "dtype": "window"
+          }
+        ],
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Derived feature window",
+          "fields": [
+            {
+              "id": "features.diff_size",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 41
+            }
+          ]
+        },
+        "allowed_modules": ["navigation.inspect", "runtime.mirroring"],
+        "allowed_intents": ["open_inspector", "replay_range"],
+        "recent_events": [],
+        "explanation": {
+          "window": "5m"
+        }
+      },
+      {
+        "id": "model.route_priority",
+        "family": "decision",
+        "mode": "model",
+        "label": "Route priority",
+        "ports": [
+          {
+            "id": "features",
+            "name": "Features in",
+            "direction": "in",
+            "dtype": "window",
+            "required": true
+          },
+          {
+            "id": "score",
+            "name": "Route score",
+            "direction": "out",
+            "dtype": "decision"
+          }
+        ],
+        "authority": {
+          "default": "advisory",
+          "by_intent": {
+            "promote_candidate": "gated",
+            "rollback_model": "gated"
+          },
+          "boundary": "runtime",
+          "owner": "patchboard",
+          "requires_approval": true
+        },
+        "state": {
+          "summary": "Scores whether a human or agent should review next",
+          "fields": [
+            {
+              "id": "model.confidence",
+              "state_class": "recommendation",
+              "writable": false,
+              "derived": true,
+              "value": 0.88
+            },
+            {
+              "id": "model.active_candidate",
+              "state_class": "action",
+              "writable": true,
+              "derived": false,
+              "value": "mlp_v4"
+            }
+          ]
+        },
+        "decision": {
+          "id": "decision.route_priority",
+          "mode": "model",
+          "artifact": "mlp_v4",
+          "feature_schema": "route_features_v2",
+          "capabilities": ["decision.inspect", "trainable_model.lifecycle", "audit.export"],
+          "inputs": ["window.route_features"],
+          "output_schema": {
+            "type": "object",
+            "required": ["priority_score", "route"],
+            "properties": {
+              "priority_score": {
+                "type": "number"
+              },
+              "route": {
+                "type": "string"
+              }
+            }
+          },
+          "confidence": 0.88,
+          "explanation": {
+            "threshold": 0.7,
+            "top_features": ["diff_size", "failing_tests"]
+          },
+          "proposed_intents": [],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect", "trainable_model.lifecycle", "labeling.feedback", "audit.export"],
+        "allowed_intents": ["inspect_decision", "label_event", "replay_candidate", "start_candidate_shadow", "promote_candidate", "rollback_model"],
+        "state_chart": {
+          "states": ["idle", "evaluating", "shadow", "active", "rolled_back"],
+          "initial": "idle",
+          "current": "shadow",
+          "transitions": [
+            {"from": "idle", "event": "replay_candidate", "to": "evaluating"},
+            {"from": "evaluating", "event": "start_candidate_shadow", "to": "shadow"},
+            {"from": "shadow", "event": "promote_candidate", "to": "active"},
+            {"from": "active", "event": "rollback_model", "to": "rolled_back"},
+            {"from": "rolled_back", "event": "replay_candidate", "to": "evaluating"},
+            {"from": "shadow", "event": "rollback_model", "to": "rolled_back"}
+          ]
+        },
+        "recent_events": [],
+        "explanation": {
+          "trainable": true
+        }
+      },
+      {
+        "id": "gate.approval",
+        "family": "gate",
+        "mode": "approval_required",
+        "label": "Approval gate",
+        "ports": [
+          {
+            "id": "score",
+            "name": "Score in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          },
+          {
+            "id": "release",
+            "name": "Release signal",
+            "direction": "out",
+            "dtype": "decision"
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "webhook",
+          "endpoint": "https://hooks.example.com/route",
+          "format": "json",
+          "schema_ref": "route_release_v1",
+          "auth_ref": "route_hook"
+        },
+        "authority": {
+          "default": "gated",
+          "boundary": "runtime",
+          "owner": "patchboard",
+          "requires_approval": true
+        },
+        "state": {
+          "summary": "Holding action until approved",
+          "fields": [
+            {
+              "id": "gate.held",
+              "state_class": "action",
+              "writable": true,
+              "derived": false,
+              "value": true
+            }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "reject_action", "hold_gate", "release_gate"],
+        "state_chart": {
+          "states": ["open", "held", "released", "rejected"],
+          "initial": "open",
+          "current": "held",
+          "transitions": [
+            {"from": "open", "event": "hold_gate", "to": "held"},
+            {"from": "held", "event": "release_gate", "to": "released"},
+            {"from": "held", "event": "reject_action", "to": "rejected"},
+            {"from": "released", "event": "hold_gate", "to": "held"},
+            {"from": "rejected", "event": "hold_gate", "to": "held"}
+          ]
+        },
+        "recent_events": [],
+        "explanation": {
+          "policy": "explicit approval for external effects"
+        }
+      },
+      {
+        "id": "agent.review_patch",
+        "family": "decision",
+        "mode": "small_agent",
+        "label": "Patch review agent",
+        "ports": [
+          {
+            "id": "context",
+            "name": "Context in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          },
+          {
+            "id": "intent",
+            "name": "Proposed intent",
+            "direction": "out",
+            "dtype": "decision"
+          }
+        ],
+        "authority": {
+          "default": "advisory",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Running bounded review loop",
+          "fields": [
+            {
+              "id": "agent.run_state",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": "running"
+            }
+          ]
+        },
+        "decision": {
+          "id": "decision.agent_review",
+          "mode": "small_agent",
+          "capabilities": ["agent_lifecycle", "approval.gates"],
+          "inputs": ["source.editor", "model.route_priority"],
+          "output_schema": {
+            "type": "object",
+            "required": ["intent_type"]
+          },
+          "confidence": 0.74,
+          "explanation": {
+            "packet": "compact evidence window"
+          },
+          "proposed_intents": [
+            {
+              "id": "intent.approve.patch-1",
+              "type": "approve_action",
+              "target": {
+                "kind": "node",
+                "id": "gate.approval"
+              },
+              "payload": {
+                "action_id": "patch-1"
+              },
+              "actor": "agent.review_patch",
+              "authority": "gated",
+              "reason": "Review found no blocking issue",
+              "evidence": [
+                {
+                  "kind": "test",
+                  "ref": "ci/run/123",
+                  "summary": "Focused checks passed"
+                }
+              ],
+              "created_at": "2026-06-29T15:00:12Z",
+              "idempotency_key": "patch-1:approval"
+            }
+          ],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["agent.lifecycle", "approval.gates"],
+        "allowed_intents": ["inspect_agent_run", "pause_agent_run", "resume_agent_run", "cancel_agent_run", "approve_action"],
+        "state_chart": {
+          "states": ["idle", "running", "paused", "completed", "failed", "cancelled"],
+          "initial": "idle",
+          "current": "running",
+          "transitions": [
+            {"from": "idle", "event": "resume_agent_run", "to": "running"},
+            {"from": "running", "event": "pause_agent_run", "to": "paused"},
+            {"from": "paused", "event": "resume_agent_run", "to": "running"},
+            {"from": "running", "event": "cancel_agent_run", "to": "cancelled"},
+            {"from": "paused", "event": "cancel_agent_run", "to": "cancelled"},
+            {"from": "running", "event": "approve_action", "to": "completed"},
+            {"from": "running", "event": "reject_action", "to": "failed"}
+          ]
+        },
+        "recent_events": [],
+        "explanation": {
+          "run_id": "run.patch-review.1"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge.source.window",
+        "from": "source.editor",
+        "to": "window.route_features",
+        "label": "events",
+        "from_port": "events",
+        "to_port": "events",
+        "stream_telemetry": {
+          "rate_hz": 0.1,
+          "latency_ms": 12,
+          "freshness_ms": 40,
+          "last_value_preview": {
+            "events_per_minute": 6
+          },
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.window.model",
+        "from": "window.route_features",
+        "to": "model.route_priority",
+        "label": "features",
+        "from_port": "features",
+        "to_port": "features",
+        "stream_telemetry": {
+          "rate_hz": 0.2,
+          "latency_ms": 5,
+          "freshness_ms": 25,
+          "last_value_preview": {
+            "diff_size": 41
+          },
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.model.gate",
+        "from": "model.route_priority",
+        "to": "gate.approval",
+        "label": "route score",
+        "from_port": "score",
+        "to_port": "score",
+        "stream_telemetry": {
+          "rate_hz": 0.2,
+          "latency_ms": 8,
+          "freshness_ms": 30,
+          "last_value_preview": {
+            "priority_score": 0.88,
+            "route": "agent_review"
+          },
+          "distribution_hint": {
+            "mean": 0.81,
+            "p95": 0.92
+          },
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.gate.agent",
+        "from": "gate.approval",
+        "to": "agent.review_patch",
+        "label": "review request",
+        "from_port": "release",
+        "to_port": "context",
+        "stream_telemetry": {
+          "rate_hz": 0.05,
+          "latency_ms": 3,
+          "freshness_ms": 200,
+          "last_value_preview": {
+            "released": false
+          },
+          "missing_data": false
+        }
+      }
+    ],
+    "timeline": [
+      {
+        "id": "timeline.features.updated",
+        "kind": "features_updated",
+        "state_class": "observation",
+        "created_at": "2026-06-29T15:00:00Z",
+        "payload": {
+          "diff_size": 41
+        },
+        "node_id": "window.route_features"
+      },
+      {
+        "id": "timeline.model.scored",
+        "kind": "model_scored",
+        "state_class": "recommendation",
+        "created_at": "2026-06-29T15:00:02Z",
+        "payload": {
+          "priority_score": 0.88,
+          "route": "agent_review"
+        },
+        "node_id": "model.route_priority",
+        "decision_id": "decision.route_priority"
+      },
+      {
+        "id": "timeline.agent.proposed",
+        "kind": "agent_intent_proposed",
+        "state_class": "recommendation",
+        "created_at": "2026-06-29T15:00:12Z",
+        "payload": {
+          "intent": "approve_action"
+        },
+        "node_id": "agent.review_patch",
+        "run_id": "run.patch-review.1",
+        "decision_id": "decision.agent_review"
+      }
+    ],
+    "inspectors": [],
+    "intent_modules": [
+      {
+        "id": "trainable_model.lifecycle",
+        "version": "0.1.0",
+        "capability": "trainable_model",
+        "description": "Lifecycle controls for trainable model candidates only.",
+        "intents": [
+          {
+            "type": "replay_candidate",
+            "authority": "advisory",
+            "target_families": ["decision"],
+            "payload_schema": {
+              "type": "object",
+              "required": ["candidate_id"]
+            }
+          },
+          {
+            "type": "promote_candidate",
+            "authority": "gated",
+            "target_families": ["decision"],
+            "payload_schema": {
+              "type": "object",
+              "required": ["candidate_id"]
+            }
+          }
+        ]
+      },
+      {
+        "id": "agent.lifecycle",
+        "version": "0.1.0",
+        "capability": "agent_lifecycle",
+        "intents": [
+          {
+            "type": "inspect_agent_run",
+            "authority": "local",
+            "target_families": ["decision"],
+            "payload_schema": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      {
+        "id": "approval.gates",
+        "version": "0.1.0",
+        "capability": "approval",
+        "intents": [
+          {
+            "type": "approve_action",
+            "authority": "gated",
+            "target_families": ["gate"],
+            "payload_schema": {
+              "type": "object",
+              "required": ["action_id"]
+            }
+          }
+        ]
+      }
+    ],
+    "allowed_intents": ["open_inspector", "replay_candidate", "promote_candidate", "inspect_agent_run", "approve_action"],
+    "snapshot": {
+      "id": "snapshot.patchboard.1",
+      "created_at": "2026-06-29T15:00:15Z",
+      "read_only": true,
+      "delta_cursor": "cursor-patchboard-1"
+    }
+  }
+}

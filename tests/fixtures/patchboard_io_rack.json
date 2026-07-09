@@ -1,0 +1,755 @@
+{
+  "schema_version": "0.3.0",
+  "graph": {
+    "id": "patchboard.io_rack",
+    "name": "Patchboard I/O rack",
+    "description": "Exercise every IoBinding transport: timer, stdin_jsonl, file_tail, webhook, and websocket ingress feeding a feature window + router that fans out to webhook, websocket, notify, exec, and mcp egress.",
+    "source": "patchboard",
+    "authority": {
+      "default": "gated",
+      "boundary": "runtime",
+      "owner": "patchboard",
+      "requires_approval": true
+    },
+    "nodes": [
+      {
+        "id": "source.timer",
+        "family": "source",
+        "mode": "timer",
+        "label": "Timer tick",
+        "ports": [
+          {
+            "id": "tick",
+            "name": "Tick",
+            "direction": "out",
+            "dtype": "event"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "timer",
+          "endpoint": "every:30s",
+          "format": "json"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Periodic timer driving the rack",
+          "fields": [
+            {
+              "id": "timer.fired",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "interval_ms": 30000
+        }
+      },
+      {
+        "id": "source.stdin",
+        "family": "source",
+        "mode": "stdin_jsonl",
+        "label": "stdin JSONL",
+        "ports": [
+          {
+            "id": "line",
+            "name": "Line",
+            "direction": "out",
+            "dtype": "event"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "stdin_jsonl",
+          "format": "jsonl"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "One JSON object per line from stdin",
+          "fields": [
+            {
+              "id": "stdin.lines_seen",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "transport": "stdin_jsonl"
+        }
+      },
+      {
+        "id": "source.log_tail",
+        "family": "source",
+        "mode": "file_tail",
+        "label": "Log tail",
+        "ports": [
+          {
+            "id": "record",
+            "name": "Record",
+            "direction": "out",
+            "dtype": "event"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "file_tail",
+          "endpoint": "./var/app.log",
+          "format": "jsonl"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Tailed application log",
+          "fields": [
+            {
+              "id": "log.bytes_seen",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "follow": true
+        }
+      },
+      {
+        "id": "source.webhook_in",
+        "family": "source",
+        "mode": "webhook",
+        "label": "Webhook intake",
+        "ports": [
+          {
+            "id": "payload",
+            "name": "Payload",
+            "direction": "out",
+            "dtype": "event"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "webhook",
+          "endpoint": "/hooks/intake",
+          "format": "json",
+          "schema_ref": "intake_event_v1",
+          "auth_ref": "intake_hook"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Inbound webhook events",
+          "fields": [
+            {
+              "id": "webhook.received",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "method": "POST"
+        }
+      },
+      {
+        "id": "source.ws_feed",
+        "family": "source",
+        "mode": "websocket",
+        "label": "WebSocket feed",
+        "ports": [
+          {
+            "id": "quote",
+            "name": "Quote",
+            "direction": "out",
+            "dtype": "scalar"
+          }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "websocket",
+          "endpoint": "wss://feed.example.com/quotes",
+          "format": "json",
+          "auth_ref": "feed_token"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Subscribed remote WebSocket feed",
+          "fields": [
+            {
+              "id": "ws.last_quote",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0.0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "subscribe": "quotes"
+        }
+      },
+      {
+        "id": "transform.feature_window",
+        "family": "transform",
+        "mode": "rolling_window",
+        "label": "Feature window",
+        "ports": [
+          {
+            "id": "timer",
+            "name": "Timer",
+            "direction": "in",
+            "dtype": "event"
+          },
+          {
+            "id": "stdin",
+            "name": "stdin",
+            "direction": "in",
+            "dtype": "event"
+          },
+          {
+            "id": "log",
+            "name": "Log",
+            "direction": "in",
+            "dtype": "event"
+          },
+          {
+            "id": "webhook",
+            "name": "Webhook",
+            "direction": "in",
+            "dtype": "event"
+          },
+          {
+            "id": "quote",
+            "name": "Quote",
+            "direction": "in",
+            "dtype": "scalar"
+          },
+          {
+            "id": "feature",
+            "name": "Feature vector",
+            "direction": "out",
+            "dtype": "vector"
+          }
+        ],
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Aggregated feature vector over the rolling window",
+          "fields": [
+            {
+              "id": "feature.dim",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 8
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "window": "1m"
+        }
+      },
+      {
+        "id": "decision.router",
+        "family": "decision",
+        "mode": "deterministic",
+        "label": "Router",
+        "ports": [
+          {
+            "id": "feature",
+            "name": "Feature in",
+            "direction": "in",
+            "dtype": "vector",
+            "required": true
+          },
+          {
+            "id": "route",
+            "name": "Route decision",
+            "direction": "out",
+            "dtype": "decision"
+          }
+        ],
+        "authority": {
+          "default": "advisory",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Routes the feature vector to one or more egress channels",
+          "fields": [
+            {
+              "id": "route.selected",
+              "state_class": "recommendation",
+              "writable": false,
+              "derived": true,
+              "value": "notify"
+            }
+          ]
+        },
+        "decision": {
+          "id": "decision.router",
+          "mode": "deterministic",
+          "capabilities": ["decision.inspect"],
+          "inputs": ["transform.feature_window"],
+          "output_schema": {
+            "type": "object",
+            "required": ["channel"],
+            "properties": {
+              "channel": {
+                "type": "string"
+              }
+            }
+          },
+          "confidence": 0.9,
+          "explanation": {
+            "rule": "threshold"
+          },
+          "proposed_intents": [],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect"],
+        "allowed_intents": ["inspect_decision"],
+        "recent_events": [],
+        "explanation": {
+          "deterministic": true
+        }
+      },
+      {
+        "id": "output.webhook_out",
+        "family": "output",
+        "mode": "webhook_post",
+        "label": "Webhook POST",
+        "ports": [
+          {
+            "id": "route",
+            "name": "Route in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "webhook",
+          "endpoint": "https://hooks.example.com/route",
+          "format": "json",
+          "schema_ref": "route_packet_v1",
+          "auth_ref": "route_hook"
+        },
+        "authority": {
+          "default": "gated",
+          "boundary": "runtime",
+          "owner": "patchboard",
+          "requires_approval": true
+        },
+        "state": {
+          "summary": "POSTs a bounded JSON packet on a routed decision",
+          "fields": [
+            {
+              "id": "webhook.posted",
+              "state_class": "action",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": {
+          "effect": "external"
+        }
+      },
+      {
+        "id": "output.ws_broadcast",
+        "family": "output",
+        "mode": "websocket_server",
+        "label": "WebSocket broadcast",
+        "ports": [
+          {
+            "id": "route",
+            "name": "Route in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "websocket",
+          "endpoint": "ws://0.0.0.0:8787/delta",
+          "format": "json"
+        },
+        "authority": {
+          "default": "local",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Broadcasts Snapshot/Delta so other systems observe in realtime",
+          "fields": [
+            {
+              "id": "ws.subscribers",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": {
+          "spine": "delta stream"
+        }
+      },
+      {
+        "id": "gate.notify",
+        "family": "gate",
+        "mode": "desktop_notify",
+        "label": "Desktop notify",
+        "ports": [
+          {
+            "id": "route",
+            "name": "Route in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "notify",
+          "format": "text"
+        },
+        "authority": {
+          "default": "gated",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Surfaces a desktop notification when routed",
+          "fields": [
+            {
+              "id": "notify.sent",
+              "state_class": "action",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": {
+          "effect": "operator-visible"
+        }
+      },
+      {
+        "id": "gate.exec_action",
+        "family": "gate",
+        "mode": "allowlisted_exec",
+        "label": "Exec action",
+        "ports": [
+          {
+            "id": "route",
+            "name": "Route in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "exec",
+          "endpoint": "allowlist:deploy.sh",
+          "format": "argv"
+        },
+        "authority": {
+          "default": "gated",
+          "boundary": "runtime",
+          "owner": "patchboard",
+          "requires_approval": true
+        },
+        "state": {
+          "summary": "Runs an allowlisted command on a routed, approved decision",
+          "fields": [
+            {
+              "id": "exec.invoked",
+              "state_class": "action",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": {
+          "allowlist": true
+        }
+      },
+      {
+        "id": "gate.agent_trigger",
+        "family": "gate",
+        "mode": "mcp_trigger",
+        "label": "Agent trigger",
+        "ports": [
+          {
+            "id": "route",
+            "name": "Route in",
+            "direction": "in",
+            "dtype": "decision",
+            "required": true
+          }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "mcp",
+          "endpoint": "patchboard.approve_intent",
+          "format": "json",
+          "auth_ref": "mcp_session"
+        },
+        "authority": {
+          "default": "advisory",
+          "boundary": "runtime",
+          "owner": "patchboard"
+        },
+        "state": {
+          "summary": "Sends an advisory agent trigger packet (never direct)",
+          "fields": [
+            {
+              "id": "agent.triggered",
+              "state_class": "action",
+              "writable": false,
+              "derived": true,
+              "value": 0
+            }
+          ]
+        },
+        "allowed_modules": ["agent.lifecycle"],
+        "allowed_intents": ["inspect_agent_run"],
+        "recent_events": [],
+        "explanation": {
+          "advisory": true
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge.timer.window",
+        "from": "source.timer",
+        "to": "transform.feature_window",
+        "from_port": "tick",
+        "to_port": "timer",
+        "stream_telemetry": {
+          "rate_hz": 0.03,
+          "freshness_ms": 1000,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.stdin.window",
+        "from": "source.stdin",
+        "to": "transform.feature_window",
+        "from_port": "line",
+        "to_port": "stdin",
+        "stream_telemetry": {
+          "rate_hz": 1.0,
+          "freshness_ms": 500,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.log.window",
+        "from": "source.log_tail",
+        "to": "transform.feature_window",
+        "from_port": "record",
+        "to_port": "log",
+        "stream_telemetry": {
+          "rate_hz": 2.0,
+          "freshness_ms": 50,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.webhook.window",
+        "from": "source.webhook_in",
+        "to": "transform.feature_window",
+        "from_port": "payload",
+        "to_port": "webhook",
+        "stream_telemetry": {
+          "rate_hz": 0.5,
+          "freshness_ms": 200,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.ws.window",
+        "from": "source.ws_feed",
+        "to": "transform.feature_window",
+        "from_port": "quote",
+        "to_port": "quote",
+        "stream_telemetry": {
+          "rate_hz": 10.0,
+          "latency_ms": 20,
+          "freshness_ms": 100,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.window.router",
+        "from": "transform.feature_window",
+        "to": "decision.router",
+        "from_port": "feature",
+        "to_port": "feature",
+        "stream_telemetry": {
+          "rate_hz": 1.0,
+          "latency_ms": 4,
+          "freshness_ms": 80,
+          "last_value_preview": {
+            "dim": 8
+          },
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.router.webhook_out",
+        "from": "decision.router",
+        "to": "output.webhook_out",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": {
+          "rate_hz": 0.2,
+          "freshness_ms": 300,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.router.ws_broadcast",
+        "from": "decision.router",
+        "to": "output.ws_broadcast",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": {
+          "rate_hz": 1.0,
+          "freshness_ms": 16,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.router.notify",
+        "from": "decision.router",
+        "to": "gate.notify",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": {
+          "rate_hz": 0.1,
+          "freshness_ms": 400,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.router.exec",
+        "from": "decision.router",
+        "to": "gate.exec_action",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": {
+          "rate_hz": 0.02,
+          "freshness_ms": 1000,
+          "missing_data": false
+        }
+      },
+      {
+        "id": "edge.router.agent",
+        "from": "decision.router",
+        "to": "gate.agent_trigger",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": {
+          "rate_hz": 0.05,
+          "freshness_ms": 600,
+          "missing_data": true
+        }
+      }
+    ],
+    "timeline": [],
+    "inspectors": [],
+    "intent_modules": [
+      {
+        "id": "approval.gates",
+        "version": "0.1.0",
+        "capability": "approval",
+        "intents": [
+          {
+            "type": "approve_action",
+            "authority": "gated",
+            "target_families": ["gate", "output"],
+            "payload_schema": {
+              "type": "object"
+            }
+          }
+        ]
+      }
+    ],
+    "allowed_intents": ["open_inspector", "inspect_decision", "approve_action"],
+    "snapshot": {
+      "id": "snapshot.io-rack.1",
+      "created_at": "2026-07-09T00:00:00Z",
+      "read_only": true,
+      "delta_cursor": "cursor-io-rack-1"
+    }
+  }
+}

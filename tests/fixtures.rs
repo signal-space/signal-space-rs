@@ -3,12 +3,9 @@ use signal_space::{
     SUPPORTED_VERSIONS, StateChart, parse_document, round_trip, validate_document,
 };
 
-const AGENT_DOC_FIXTURE: &str =
-    include_str!("../../signal-space-spec/fixtures/agent_doc_supervisor.json");
-const PATCHBOARD_FIXTURE: &str =
-    include_str!("../../signal-space-spec/fixtures/patchboard_attention_router.json");
-const IO_RACK_FIXTURE: &str =
-    include_str!("../../signal-space-spec/fixtures/patchboard_io_rack.json");
+const AGENT_DOC_FIXTURE: &str = include_str!("fixtures/agent_doc_supervisor.json");
+const PATCHBOARD_FIXTURE: &str = include_str!("fixtures/patchboard_attention_router.json");
+const IO_RACK_FIXTURE: &str = include_str!("fixtures/patchboard_io_rack.json");
 
 #[test]
 fn schema_version_is_0_3_0() {

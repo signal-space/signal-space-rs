@@ -1,0 +1,307 @@
+{
+  "schema_version": "0.2.0",
+  "graph": {
+    "id": "agent_doc.supervisor",
+    "name": "agent-doc supervisor",
+    "description": "Read-only projection of agent-doc queue, signals, perceptron, and schedule state.",
+    "source": "agent-doc",
+    "authority": {
+      "default": "advisory",
+      "boundary": "product",
+      "owner": "agent-doc",
+      "requires_approval": true
+    },
+    "nodes": [
+      {
+        "id": "agent.queue",
+        "family": "source",
+        "mode": "markdown_queue",
+        "label": "Queue",
+        "authority": {
+          "default": "advisory",
+          "boundary": "product",
+          "owner": "agent-doc"
+        },
+        "state": {
+          "summary": "Two runnable prompt heads",
+          "fields": [
+            {
+              "id": "queue.depth",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": 2
+            }
+          ]
+        },
+        "allowed_modules": ["navigation.inspect", "agent_doc.adapter"],
+        "allowed_intents": ["select_queue_item", "request_route"],
+        "recent_events": [
+          {
+            "id": "evt.queue.detected",
+            "kind": "queue_detected",
+            "state_class": "observation",
+            "created_at": "2026-06-29T14:00:00Z",
+            "payload": {
+              "count": 2
+            }
+          }
+        ],
+        "explanation": {
+          "source": "agent:queue markdown block"
+        },
+        "provenance": {
+          "document": "tasks/example-agent-doc.md"
+        }
+      },
+      {
+        "id": "agent.signals",
+        "family": "transform",
+        "mode": "deterministic",
+        "label": "Signals",
+        "authority": {
+          "default": "local",
+          "boundary": "view",
+          "owner": "agent-doc"
+        },
+        "state": {
+          "summary": "Derived health and readiness observations",
+          "fields": [
+            {
+              "id": "signals.ready",
+              "state_class": "observation",
+              "writable": false,
+              "derived": true,
+              "value": true
+            }
+          ]
+        },
+        "allowed_modules": ["navigation.inspect"],
+        "allowed_intents": ["open_inspector", "show_provenance"],
+        "recent_events": [],
+        "explanation": {
+          "deterministic": true
+        }
+      },
+      {
+        "id": "agent.perceptron",
+        "family": "decision",
+        "mode": "model",
+        "label": "Route priority",
+        "authority": {
+          "default": "advisory",
+          "boundary": "product",
+          "owner": "agent-doc"
+        },
+        "state": {
+          "summary": "Recommends the next queue item",
+          "fields": [
+            {
+              "id": "perceptron.score",
+              "state_class": "recommendation",
+              "writable": false,
+              "derived": true,
+              "value": 0.82
+            }
+          ]
+        },
+        "decision": {
+          "id": "decision.route_priority",
+          "mode": "model",
+          "artifact": "agent_doc_perceptron_v1",
+          "feature_schema": "route_features_v1",
+          "capabilities": ["decision.inspect"],
+          "inputs": ["agent.queue", "agent.signals"],
+          "output_schema": {
+            "type": "object",
+            "required": ["queue_item_id", "score"],
+            "properties": {
+              "queue_item_id": {
+                "type": "string"
+              },
+              "score": {
+                "type": "number"
+              }
+            }
+          },
+          "confidence": 0.82,
+          "explanation": {
+            "top_features": ["ready_signal", "age"]
+          },
+          "proposed_intents": [
+            {
+              "id": "intent.route.item-1",
+              "type": "request_route",
+              "target": {
+                "kind": "node",
+                "id": "agent.queue"
+              },
+              "payload": {
+                "queue_item_id": "item-1"
+              },
+              "actor": "agent.perceptron",
+              "authority": "advisory",
+              "reason": "Highest score in current queue",
+              "evidence": [],
+              "created_at": "2026-06-29T14:00:02Z",
+              "idempotency_key": "agent-doc:item-1:route"
+            }
+          ],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect", "agent_doc.adapter"],
+        "allowed_intents": ["evaluate_perceptron", "render_advisory_schedule", "request_route"],
+        "recent_events": [],
+        "explanation": {
+          "advisory": true
+        }
+      },
+      {
+        "id": "agent.schedule",
+        "family": "output",
+        "mode": "advisory_schedule",
+        "label": "Schedule",
+        "authority": {
+          "default": "advisory",
+          "boundary": "product",
+          "owner": "agent-doc",
+          "requires_approval": true
+        },
+        "state": {
+          "summary": "Projected plan only; finalize/session-check owns mutation.",
+          "fields": [
+            {
+              "id": "schedule.accepted",
+              "state_class": "recommendation",
+              "writable": false,
+              "derived": true,
+              "value": false
+            }
+          ]
+        },
+        "allowed_modules": ["agent_doc.adapter", "approval.gates"],
+        "allowed_intents": ["render_advisory_schedule", "request_human_approval"],
+        "recent_events": [],
+        "explanation": {
+          "mutation_boundary": "agent-doc finalize and session-check"
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge.queue.signals",
+        "from": "agent.queue",
+        "to": "agent.signals",
+        "label": "queue observations"
+      },
+      {
+        "id": "edge.signals.perceptron",
+        "from": "agent.signals",
+        "to": "agent.perceptron",
+        "label": "features"
+      },
+      {
+        "id": "edge.perceptron.schedule",
+        "from": "agent.perceptron",
+        "to": "agent.schedule",
+        "label": "recommendation"
+      }
+    ],
+    "timeline": [
+      {
+        "id": "timeline.queue.detected",
+        "kind": "queue_detected",
+        "state_class": "observation",
+        "created_at": "2026-06-29T14:00:00Z",
+        "payload": {
+          "count": 2
+        },
+        "node_id": "agent.queue"
+      },
+      {
+        "id": "timeline.route.recommended",
+        "kind": "route_recommended",
+        "state_class": "recommendation",
+        "created_at": "2026-06-29T14:00:02Z",
+        "payload": {
+          "queue_item_id": "item-1",
+          "score": 0.82
+        },
+        "node_id": "agent.perceptron",
+        "decision_id": "decision.route_priority"
+      }
+    ],
+    "inspectors": [
+      {
+        "id": "inspector.perceptron",
+        "target": {
+          "kind": "node",
+          "id": "agent.perceptron"
+        },
+        "sections": [
+          {
+            "id": "section.score",
+            "title": "Score",
+            "fields": [
+              {
+                "id": "perceptron.score",
+                "state_class": "recommendation",
+                "writable": false,
+                "derived": true,
+                "value": 0.82
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "intent_modules": [
+      {
+        "id": "navigation.inspect",
+        "version": "0.1.0",
+        "capability": "navigation",
+        "intents": [
+          {
+            "type": "open_inspector",
+            "authority": "local",
+            "target_families": ["source", "decision", "output"],
+            "payload_schema": {
+              "type": "object"
+            }
+          }
+        ]
+      },
+      {
+        "id": "agent_doc.adapter",
+        "version": "0.1.0",
+        "capability": "product_adapter",
+        "intents": [
+          {
+            "type": "request_route",
+            "authority": "advisory",
+            "target_families": ["source"],
+            "payload_schema": {
+              "type": "object",
+              "required": ["queue_item_id"]
+            }
+          },
+          {
+            "type": "render_advisory_schedule",
+            "authority": "advisory",
+            "target_families": ["output"],
+            "payload_schema": {
+              "type": "object"
+            }
+          }
+        ]
+      }
+    ],
+    "allowed_intents": ["open_inspector", "request_route", "render_advisory_schedule"],
+    "snapshot": {
+      "id": "snapshot.agent-doc.1",
+      "created_at": "2026-06-29T14:00:03Z",
+      "read_only": true,
+      "delta_cursor": "cursor-1"
+    }
+  }
+}
