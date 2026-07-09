@@ -2,11 +2,16 @@
 
 Rust types and validation for Signal Space.
 
-Supported `signal-space-spec`: `0.1.0`
+Supported `signal-space-spec`: `0.3.0` (also validates `0.2.0` documents)
 
 The crate provides serde models for the shared surface contract, fixture
 validation, and an optional `lazily-runtime` feature for integration with
 `lazily-rs`.
+
+`0.3.0` adds optional typed ports (`PortSpec`), live cable telemetry
+(`StreamTelemetry`), and external transport bindings (`IoBinding`) plus edge
+`from_port`/`to_port`. Every addition is optional, so `0.2.0` documents still
+parse and validate.
 
 ## Runtime Feature
 

@@ -2,7 +2,13 @@ use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
 
-pub const SPEC_VERSION: &str = "0.2.0";
+/// The latest Signal Space schema version this binding implements.
+pub const SPEC_VERSION: &str = "0.3.0";
+
+/// Every schema version [`validate_document`] accepts. `0.2.0` documents keep
+/// validating because every `0.3.0` addition (`ports`, `stream_telemetry`,
+/// `io_binding`, and edge `from_port`/`to_port`) is optional.
+pub const SUPPORTED_VERSIONS: &[&str] = &["0.2.0", "0.3.0"];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -30,6 +36,99 @@ pub enum NodeFamily {
     Decision,
     Gate,
     Output,
+}
+
+/// Direction of a typed jack on a module. Added in `0.3.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortDirection {
+    In,
+    Out,
+}
+
+/// Jack dtype. Cables should connect compatible dtypes; a host rejects
+/// mismatched patches visibly. Added in `0.3.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortDtype {
+    Scalar,
+    Vector,
+    Event,
+    Window,
+    Decision,
+    Label,
+}
+
+/// A typed jack on a module. Edges reference ports via `from_port`/`to_port`
+/// so the patchboard can dtype-check cables and render live telemetry per jack.
+/// Added in `0.3.0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortSpec {
+    pub id: String,
+    pub name: Option<String>,
+    pub direction: PortDirection,
+    pub dtype: PortDtype,
+    #[serde(default)]
+    pub required: bool,
+}
+
+/// Live-cable readout for an edge. Always derived/observed state, never a
+/// writable cell; connector failures surface here as `missing_data` / stale
+/// freshness. Added in `0.3.0`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StreamTelemetry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_hz: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub freshness_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_value_preview: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub distribution_hint: Option<serde_json::Value>,
+    #[serde(default)]
+    pub missing_data: bool,
+}
+
+/// Direction of an external transport binding. Added in `0.3.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoDirection {
+    Ingress,
+    Egress,
+}
+
+/// How a source/output node binds to the outside world. Secrets are never
+/// inlined; `auth_ref` names a host-resolved credential. Added in `0.3.0`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IoTransport {
+    Webhook,
+    Websocket,
+    FileTail,
+    Timer,
+    StdinJsonl,
+    Exec,
+    Notify,
+    Mcp,
+}
+
+/// Declares how a node binds to an external transport. Ingress bindings are
+/// restricted to `source` nodes; egress bindings to `gate`/`output` nodes;
+/// egress must never carry `direct` authority. Added in `0.3.0`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IoBinding {
+    pub direction: IoDirection,
+    pub transport: IoTransport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schema_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ref: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -75,6 +174,13 @@ pub struct SignalNode {
     /// keep `current` in sync with its live runtime state.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state_chart: Option<StateChart>,
+    /// Typed jacks (added in `0.3.0`). Empty for nodes that predate ports.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<PortSpec>,
+    /// External transport binding (added in `0.3.0`). Ingress on sources,
+    /// egress on gates/outputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_binding: Option<IoBinding>,
     pub provenance: Option<serde_json::Value>,
 }
 
@@ -106,6 +212,16 @@ pub struct SignalEdge {
     pub authority: Option<Authority>,
     #[serde(default)]
     pub state_fields: Vec<StateField>,
+    /// Output jack on the `from` node (added in `0.3.0`). Absent on edges that
+    /// predate typed ports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_port: Option<String>,
+    /// Input jack on the `to` node (added in `0.3.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_port: Option<String>,
+    /// Live-cable readout (added in `0.3.0`). Derived only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_telemetry: Option<StreamTelemetry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -290,16 +406,17 @@ pub fn parse_document(input: &str) -> Result<SignalSpaceDocument, serde_json::Er
 }
 
 pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), ValidationError> {
-    if document.schema_version != SPEC_VERSION {
+    if !SUPPORTED_VERSIONS.contains(&document.schema_version.as_str()) {
         return Err(ValidationError::new(format!(
             "unsupported spec version: {}",
             document.schema_version
         )));
     }
 
-    let mut node_ids = HashSet::new();
+    let mut nodes_by_id: std::collections::HashMap<&str, &SignalNode> =
+        std::collections::HashMap::new();
     for node in &document.graph.nodes {
-        if !node_ids.insert(node.id.as_str()) {
+        if nodes_by_id.insert(node.id.as_str(), node).is_some() {
             return Err(ValidationError::new(format!(
                 "duplicate node id: {}",
                 node.id
@@ -346,6 +463,8 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
         if let Some(chart) = &node.state_chart {
             validate_state_chart(node.id.as_str(), chart)?;
         }
+        validate_ports(node)?;
+        validate_io_binding(node)?;
     }
 
     let mut edge_ids = HashSet::new();
@@ -356,16 +475,148 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
                 edge.id
             )));
         }
-        if !node_ids.contains(edge.from_node.as_str()) || !node_ids.contains(edge.to_node.as_str())
-        {
+        let from_node = match nodes_by_id.get(edge.from_node.as_str()) {
+            Some(node) => *node,
+            None => {
+                return Err(ValidationError::new(format!(
+                    "edge has unknown endpoint: {}",
+                    edge.id
+                )));
+            }
+        };
+        if !nodes_by_id.contains_key(edge.to_node.as_str()) {
             return Err(ValidationError::new(format!(
                 "edge has unknown endpoint: {}",
                 edge.id
             )));
         }
+        let to_node = nodes_by_id[edge.to_node.as_str()];
+        validate_edge_ports(edge, from_node, to_node)?;
     }
 
     Ok(())
+}
+
+/// Ensure port ids are unique within a node. Added in `0.3.0`.
+fn validate_ports(node: &SignalNode) -> Result<(), ValidationError> {
+    let mut seen = HashSet::new();
+    for port in &node.ports {
+        if !seen.insert(port.id.as_str()) {
+            return Err(ValidationError::new(format!(
+                "duplicate port id: {} on node {}",
+                port.id, node.id
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Enforce the IoBinding authority boundary. Ingress binds to `source` nodes;
+/// egress binds to `gate`/`output` nodes; egress never carries `direct`
+/// authority. Added in `0.3.0`.
+fn validate_io_binding(node: &SignalNode) -> Result<(), ValidationError> {
+    let Some(binding) = &node.io_binding else {
+        return Ok(());
+    };
+    match binding.direction {
+        IoDirection::Ingress => {
+            if node.family != NodeFamily::Source {
+                return Err(ValidationError::new(format!(
+                    "ingress io_binding only allowed on source nodes: {}",
+                    node.id
+                )));
+            }
+        }
+        IoDirection::Egress => {
+            if !matches!(node.family, NodeFamily::Gate | NodeFamily::Output) {
+                return Err(ValidationError::new(format!(
+                    "egress io_binding only allowed on gate/output nodes: {}",
+                    node.id
+                )));
+            }
+            if node.authority.default == AuthorityLevel::Direct {
+                return Err(ValidationError::new(format!(
+                    "egress io_binding cannot carry direct authority: {}",
+                    node.id
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// When an edge names its jacks, both ports must exist; the `from` jack must be
+/// an output and the `to` jack an input; and the dtypes must match so the UI
+/// can dtype-check a patch visibly. Added in `0.3.0`.
+fn validate_edge_ports(
+    edge: &SignalEdge,
+    from_node: &SignalNode,
+    to_node: &SignalNode,
+) -> Result<(), ValidationError> {
+    let from_port = match &edge.from_port {
+        Some(id) => match from_node.ports.iter().find(|p| &p.id == id) {
+            Some(port) => port,
+            None => {
+                return Err(ValidationError::new(format!(
+                    "edge from_port not found on {}: {}",
+                    from_node.id, edge.id
+                )));
+            }
+        },
+        None => return Ok(()),
+    };
+    let to_port_id = match &edge.to_port {
+        Some(id) => id,
+        None => {
+            return Err(ValidationError::new(format!(
+                "edge names from_port but not to_port: {}",
+                edge.id
+            )));
+        }
+    };
+    let to_port = match to_node.ports.iter().find(|p| &p.id == to_port_id) {
+        Some(port) => port,
+        None => {
+            return Err(ValidationError::new(format!(
+                "edge to_port not found on {}: {}",
+                to_node.id, edge.id
+            )));
+        }
+    };
+    if from_port.direction != PortDirection::Out {
+        return Err(ValidationError::new(format!(
+            "edge from_port is not an output jack: {}",
+            edge.id
+        )));
+    }
+    if to_port.direction != PortDirection::In {
+        return Err(ValidationError::new(format!(
+            "edge to_port is not an input jack: {}",
+            edge.id
+        )));
+    }
+    if from_port.dtype != to_port.dtype {
+        return Err(ValidationError::new(format!(
+            "edge port dtype mismatch ({} -> {}): {}",
+            from_port.dtype_as_str(),
+            to_port.dtype_as_str(),
+            edge.id
+        )));
+    }
+    Ok(())
+}
+
+impl PortSpec {
+    fn dtype_as_str(&self) -> &'static str {
+        match self.dtype {
+            PortDtype::Scalar => "scalar",
+            PortDtype::Vector => "vector",
+            PortDtype::Event => "event",
+            PortDtype::Window => "window",
+            PortDtype::Decision => "decision",
+            PortDtype::Label => "label",
+        }
+    }
 }
 
 fn grants_direct_authority(
