@@ -75,7 +75,7 @@ pub struct PortSpec {
 /// Live-cable readout for an edge. Always derived/observed state, never a
 /// writable cell; connector failures surface here as `missing_data` / stale
 /// freshness. Added in `0.3.0`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct StreamTelemetry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_hz: Option<f64>,
