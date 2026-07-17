@@ -11,6 +11,7 @@ jobs:
     environment: crates
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           repository: signal-space/signal-space-spec
           path: signal-space-spec
