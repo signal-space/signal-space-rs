@@ -6,16 +6,20 @@ use signal_space::{
 const AGENT_DOC_FIXTURE: &str = include_str!("fixtures/agent_doc_supervisor.json");
 const PATCHBOARD_FIXTURE: &str = include_str!("fixtures/patchboard_attention_router.json");
 const IO_RACK_FIXTURE: &str = include_str!("fixtures/patchboard_io_rack.json");
+const WEBHOOK_TRIAGE_FIXTURE: &str = include_str!("fixtures/patchboard_webhook_triage.json");
+const SCHEDULED_ANOMALY_FIXTURE: &str = include_str!("fixtures/patchboard_scheduled_anomaly.json");
+const EVENT_FANOUT_FIXTURE: &str = include_str!("fixtures/patchboard_event_fanout.json");
 
 #[test]
-fn schema_version_is_0_3_0() {
-    assert_eq!(SPEC_VERSION, "0.3.0");
+fn schema_version_is_0_4_0() {
+    assert_eq!(SPEC_VERSION, "0.4.0");
 }
 
 #[test]
 fn supported_versions_keep_0_2_0_documents_valid() {
     assert!(SUPPORTED_VERSIONS.contains(&"0.2.0"));
     assert!(SUPPORTED_VERSIONS.contains(&"0.3.0"));
+    assert!(SUPPORTED_VERSIONS.contains(&"0.4.0"));
 }
 
 #[test]
@@ -156,6 +160,43 @@ fn validates_io_rack_fixture() {
     let document = parse_document(IO_RACK_FIXTURE).expect("fixture parses");
     validate_document(&document).expect("fixture validates");
     assert_eq!(document.schema_version, SPEC_VERSION);
+}
+
+#[test]
+fn validates_workflow_template_fixtures() {
+    for fixture in [
+        WEBHOOK_TRIAGE_FIXTURE,
+        SCHEDULED_ANOMALY_FIXTURE,
+        EVENT_FANOUT_FIXTURE,
+    ] {
+        let document = parse_document(fixture).expect("template fixture parses");
+        validate_document(&document).expect("template fixture validates");
+        assert_eq!(document.schema_version, SPEC_VERSION);
+        // 0.4.0 template metadata: every template catalog graph carries category + tags.
+        assert_eq!(
+            document.graph.category.as_deref(),
+            Some("workflow_template"),
+            "template {} missing category",
+            document.graph.id
+        );
+        assert!(
+            !document.graph.tags.is_empty(),
+            "template {} missing tags",
+            document.graph.id
+        );
+        // Templates never grant direct authority to any node.
+        assert!(
+            document
+                .graph
+                .nodes
+                .iter()
+                .all(|n| n.authority.default != AuthorityLevel::Direct)
+        );
+        // Round-trips with the new optional fields preserved.
+        let round_tripped = round_trip(&document).unwrap();
+        assert_eq!(round_tripped.graph.category, document.graph.category);
+        assert_eq!(round_tripped.graph.tags, document.graph.tags);
+    }
 }
 
 #[test]

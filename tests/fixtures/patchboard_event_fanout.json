@@ -1,0 +1,354 @@
+{
+  "schema_version": "0.4.0",
+  "graph": {
+    "id": "patchboard.event_fanout",
+    "name": "Event fan-out",
+    "description": "n8n-style event fan-out workflow template: a WebSocket feed drives a feature window, a deterministic Switch router, an MLP route scorer, an approval gate, and three egress actions (webhook POST, allowlisted exec, advisory MCP trigger). Exercises MLP + multi-service egress fan-out.",
+    "source": "patchboard",
+    "category": "workflow_template",
+    "tags": ["trigger:websocket", "action:webhook", "action:exec", "action:mcp", "mlp", "switch", "n8n:websocket→switch→fanout"],
+    "authority": {
+      "default": "gated",
+      "boundary": "runtime",
+      "owner": "patchboard",
+      "requires_approval": true
+    },
+    "nodes": [
+      {
+        "id": "source.ws_feed",
+        "family": "source",
+        "mode": "websocket",
+        "label": "WebSocket feed",
+        "ports": [
+          { "id": "quote", "name": "Quote", "direction": "out", "dtype": "scalar" }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "websocket",
+          "endpoint": "wss://feed.example.com/quotes",
+          "format": "json",
+          "auth_ref": "feed_token"
+        },
+        "authority": { "default": "local", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Subscribed remote WebSocket feed (n8n WebSocket trigger)",
+          "fields": [
+            { "id": "ws.last_quote", "state_class": "observation", "writable": false, "derived": true, "value": 0.0 }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": { "subscribe": "quotes" }
+      },
+      {
+        "id": "transform.feature_window",
+        "family": "transform",
+        "mode": "rolling_window",
+        "label": "Feature window",
+        "ports": [
+          { "id": "quote", "name": "Quote in", "direction": "in", "dtype": "scalar", "required": true },
+          { "id": "feature", "name": "Feature vector", "direction": "out", "dtype": "vector" }
+        ],
+        "authority": { "default": "local", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Aggregated feature vector over the rolling window",
+          "fields": [
+            { "id": "feature.dim", "state_class": "observation", "writable": false, "derived": true, "value": 4 }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": { "window": "30s" }
+      },
+      {
+        "id": "decision.switch",
+        "family": "decision",
+        "mode": "deterministic",
+        "label": "Route switch",
+        "ports": [
+          { "id": "feature", "name": "Feature in", "direction": "in", "dtype": "vector", "required": true },
+          { "id": "route", "name": "Route decision", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "advisory", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Deterministic IF/Switch: gates which events are worth scoring (n8n Switch node)",
+          "fields": [
+            { "id": "route.selected", "state_class": "recommendation", "writable": false, "derived": true, "value": "score" }
+          ]
+        },
+        "decision": {
+          "id": "decision.switch",
+          "mode": "deterministic",
+          "capabilities": ["decision.inspect"],
+          "inputs": ["transform.feature_window"],
+          "output_schema": {
+            "type": "object",
+            "required": ["channel"],
+            "properties": { "channel": { "type": "string" } }
+          },
+          "confidence": 0.9,
+          "explanation": { "rule": "threshold" },
+          "proposed_intents": [],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect"],
+        "allowed_intents": ["inspect_decision"],
+        "recent_events": [],
+        "explanation": { "deterministic": true }
+      },
+      {
+        "id": "model.router_mlp",
+        "family": "decision",
+        "mode": "model",
+        "label": "Router MLP",
+        "ports": [
+          { "id": "route", "name": "Route in", "direction": "in", "dtype": "decision", "required": true },
+          { "id": "score", "name": "Route score", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "advisory", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Multi-layer perceptron route scorer (advisory)",
+          "fields": [
+            { "id": "model.confidence", "state_class": "recommendation", "writable": false, "derived": true, "value": 0.0 }
+          ]
+        },
+        "decision": {
+          "id": "decision.router",
+          "mode": "model",
+          "capabilities": ["decision.inspect", "trainable_model.lifecycle", "audit.export"],
+          "inputs": ["decision.switch"],
+          "output_schema": {
+            "type": "object",
+            "required": ["priority_score", "route"],
+            "properties": {
+              "priority_score": { "type": "number" },
+              "route": { "type": "string" }
+            }
+          },
+          "confidence": 0.5,
+          "explanation": { "trainable": true, "topology": "mlp" },
+          "proposed_intents": [],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect", "trainable_model.lifecycle", "labeling.feedback", "audit.export"],
+        "allowed_intents": ["inspect_decision", "label_event", "replay_candidate", "promote_candidate", "rollback_model"],
+        "state_chart": {
+          "states": ["idle", "evaluating", "shadow", "active", "rolled_back"],
+          "initial": "idle",
+          "current": "shadow",
+          "transitions": [
+            { "from": "idle", "event": "replay_candidate", "to": "evaluating" },
+            { "from": "evaluating", "event": "start_candidate_shadow", "to": "shadow" },
+            { "from": "shadow", "event": "promote_candidate", "to": "active" },
+            { "from": "active", "event": "rollback_model", "to": "rolled_back" },
+            { "from": "rolled_back", "event": "replay_candidate", "to": "evaluating" }
+          ]
+        },
+        "recent_events": [],
+        "explanation": { "recipe": "event_fanout" }
+      },
+      {
+        "id": "gate.approval",
+        "family": "gate",
+        "mode": "approval_required",
+        "label": "Approval gate",
+        "ports": [
+          { "id": "score", "name": "Score in", "direction": "in", "dtype": "decision", "required": true },
+          { "id": "release", "name": "Release signal", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "gated", "boundary": "runtime", "owner": "patchboard", "requires_approval": true },
+        "state": {
+          "summary": "Holds every fan-out action until approved",
+          "fields": [
+            { "id": "gate.held", "state_class": "action", "writable": true, "derived": false, "value": true }
+          ]
+        },
+        "state_chart": {
+          "states": ["open", "held", "released", "rejected"],
+          "initial": "open",
+          "current": "held",
+          "transitions": [
+            { "from": "open", "event": "hold_gate", "to": "held" },
+            { "from": "held", "event": "release_gate", "to": "released" },
+            { "from": "held", "event": "reject_action", "to": "rejected" },
+            { "from": "released", "event": "hold_gate", "to": "held" },
+            { "from": "rejected", "event": "hold_gate", "to": "held" }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "reject_action", "hold_gate", "release_gate"],
+        "recent_events": [],
+        "explanation": { "policy": "explicit approval for external effects" }
+      },
+      {
+        "id": "output.webhook_out",
+        "family": "output",
+        "mode": "webhook_post",
+        "label": "Webhook egress",
+        "ports": [
+          { "id": "in", "name": "In", "direction": "in", "dtype": "decision", "required": true }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "webhook",
+          "endpoint": "https://hooks.example.com/route",
+          "format": "json",
+          "schema_ref": "route_packet_v1",
+          "auth_ref": "route_hook"
+        },
+        "authority": { "default": "gated", "boundary": "runtime", "owner": "patchboard", "requires_approval": true },
+        "state": {
+          "summary": "POSTs a bounded JSON packet on a routed decision (n8n HTTP action)",
+          "fields": [
+            { "id": "webhook.posted", "state_class": "action", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": { "effect": "external" }
+      },
+      {
+        "id": "output.exec_action",
+        "family": "output",
+        "mode": "allowlisted_exec",
+        "label": "Exec action",
+        "ports": [
+          { "id": "in", "name": "In", "direction": "in", "dtype": "decision", "required": true }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "exec",
+          "endpoint": "allowlist:redeploy.sh",
+          "format": "argv"
+        },
+        "authority": { "default": "gated", "boundary": "runtime", "owner": "patchboard", "requires_approval": true },
+        "state": {
+          "summary": "Runs an allowlisted command on a routed, approved decision (n8n Execute Command action)",
+          "fields": [
+            { "id": "exec.invoked", "state_class": "action", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": { "allowlist": true }
+      },
+      {
+        "id": "output.mcp_trigger",
+        "family": "output",
+        "mode": "mcp_trigger",
+        "label": "Agent trigger",
+        "ports": [
+          { "id": "in", "name": "In", "direction": "in", "dtype": "decision", "required": true }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "mcp",
+          "endpoint": "patchboard.approve_intent",
+          "format": "json",
+          "auth_ref": "mcp_session"
+        },
+        "authority": { "default": "advisory", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Sends an advisory agent trigger packet (never direct)",
+          "fields": [
+            { "id": "agent.triggered", "state_class": "action", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["agent.lifecycle"],
+        "allowed_intents": ["inspect_agent_run"],
+        "recent_events": [],
+        "explanation": { "advisory": true }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge.ws.window",
+        "from": "source.ws_feed",
+        "to": "transform.feature_window",
+        "from_port": "quote",
+        "to_port": "quote",
+        "stream_telemetry": { "rate_hz": 10.0, "latency_ms": 20, "freshness_ms": 100, "missing_data": false }
+      },
+      {
+        "id": "edge.window.switch",
+        "from": "transform.feature_window",
+        "to": "decision.switch",
+        "from_port": "feature",
+        "to_port": "feature",
+        "stream_telemetry": { "rate_hz": 1.0, "latency_ms": 4, "freshness_ms": 80, "missing_data": false }
+      },
+      {
+        "id": "edge.switch.model",
+        "from": "decision.switch",
+        "to": "model.router_mlp",
+        "from_port": "route",
+        "to_port": "route",
+        "stream_telemetry": { "rate_hz": 0.5, "freshness_ms": 120, "missing_data": false }
+      },
+      {
+        "id": "edge.model.gate",
+        "from": "model.router_mlp",
+        "to": "gate.approval",
+        "from_port": "score",
+        "to_port": "score",
+        "stream_telemetry": { "rate_hz": 0.5, "freshness_ms": 120, "missing_data": false }
+      },
+      {
+        "id": "edge.gate.webhook",
+        "from": "gate.approval",
+        "to": "output.webhook_out",
+        "from_port": "release",
+        "to_port": "in",
+        "stream_telemetry": { "rate_hz": 0.2, "freshness_ms": 300, "missing_data": false }
+      },
+      {
+        "id": "edge.gate.exec",
+        "from": "gate.approval",
+        "to": "output.exec_action",
+        "from_port": "release",
+        "to_port": "in",
+        "stream_telemetry": { "rate_hz": 0.02, "freshness_ms": 1000, "missing_data": false }
+      },
+      {
+        "id": "edge.gate.mcp",
+        "from": "gate.approval",
+        "to": "output.mcp_trigger",
+        "from_port": "release",
+        "to_port": "in",
+        "stream_telemetry": { "rate_hz": 0.05, "freshness_ms": 600, "missing_data": true }
+      }
+    ],
+    "timeline": [],
+    "inspectors": [],
+    "intent_modules": [
+      {
+        "id": "trainable_model.lifecycle",
+        "version": "0.1.0",
+        "capability": "trainable_model",
+        "intents": [
+          { "type": "replay_candidate", "authority": "advisory", "target_families": ["decision"], "payload_schema": { "type": "object", "required": ["candidate_id"] } },
+          { "type": "promote_candidate", "authority": "gated", "target_families": ["decision"], "payload_schema": { "type": "object", "required": ["candidate_id"] } }
+        ]
+      },
+      {
+        "id": "approval.gates",
+        "version": "0.1.0",
+        "capability": "approval",
+        "intents": [
+          { "type": "approve_action", "authority": "gated", "target_families": ["gate", "output"], "payload_schema": { "type": "object" } }
+        ]
+      }
+    ],
+    "allowed_intents": ["open_inspector", "inspect_decision", "replay_candidate", "promote_candidate", "approve_action", "inspect_agent_run"],
+    "snapshot": {
+      "id": "snapshot.event-fanout.1",
+      "created_at": "2026-07-17T00:00:00Z",
+      "read_only": true,
+      "delta_cursor": "cursor-event-fanout-1"
+    }
+  }
+}

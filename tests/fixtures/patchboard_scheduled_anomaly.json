@@ -1,0 +1,333 @@
+{
+  "schema_version": "0.4.0",
+  "graph": {
+    "id": "patchboard.scheduled_anomaly",
+    "name": "Scheduled anomaly",
+    "description": "n8n-style scheduled anomaly workflow template: a timer (Schedule trigger) plus a file-tailed log feed a feature window, an MLP anomaly scorer, an approval gate, a large_agent responder, and a desktop-notify egress. Exercises agent + MLP + outside-service ingress and egress.",
+    "source": "patchboard",
+    "category": "workflow_template",
+    "tags": ["trigger:timer", "trigger:file_tail", "action:notify", "mlp", "agent:large", "n8n:schedule→workflow→notify"],
+    "authority": {
+      "default": "gated",
+      "boundary": "runtime",
+      "owner": "patchboard",
+      "requires_approval": true
+    },
+    "nodes": [
+      {
+        "id": "source.timer",
+        "family": "source",
+        "mode": "timer",
+        "label": "Schedule trigger",
+        "ports": [
+          { "id": "tick", "name": "Tick", "direction": "out", "dtype": "event" }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "timer",
+          "endpoint": "every:60s",
+          "format": "json"
+        },
+        "authority": { "default": "local", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Periodic timer driving the scan (n8n Schedule trigger)",
+          "fields": [
+            { "id": "timer.fired", "state_class": "observation", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": { "interval_ms": 60000 }
+      },
+      {
+        "id": "source.log_tail",
+        "family": "source",
+        "mode": "file_tail",
+        "label": "Log tail",
+        "ports": [
+          { "id": "record", "name": "Record", "direction": "out", "dtype": "event" }
+        ],
+        "io_binding": {
+          "direction": "ingress",
+          "transport": "file_tail",
+          "endpoint": "./var/app.log",
+          "format": "jsonl"
+        },
+        "authority": { "default": "local", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Tailed application log",
+          "fields": [
+            { "id": "log.bytes_seen", "state_class": "observation", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": { "follow": true }
+      },
+      {
+        "id": "transform.feature_window",
+        "family": "transform",
+        "mode": "rolling_window",
+        "label": "Feature window",
+        "ports": [
+          { "id": "tick", "name": "Tick", "direction": "in", "dtype": "event" },
+          { "id": "record", "name": "Log", "direction": "in", "dtype": "event" },
+          { "id": "feature", "name": "Feature vector", "direction": "out", "dtype": "vector" }
+        ],
+        "authority": { "default": "local", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Aggregated feature vector over the rolling window",
+          "fields": [
+            { "id": "feature.dim", "state_class": "observation", "writable": false, "derived": true, "value": 6 }
+          ]
+        },
+        "allowed_modules": ["runtime.mirroring"],
+        "allowed_intents": ["open_inspector"],
+        "recent_events": [],
+        "explanation": { "window": "5m" }
+      },
+      {
+        "id": "model.anomaly_mlp",
+        "family": "decision",
+        "mode": "model",
+        "label": "Anomaly MLP",
+        "ports": [
+          { "id": "feature", "name": "Feature in", "direction": "in", "dtype": "vector", "required": true },
+          { "id": "score", "name": "Anomaly score", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "advisory", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Multi-layer perceptron anomaly scorer (advisory)",
+          "fields": [
+            { "id": "model.confidence", "state_class": "recommendation", "writable": false, "derived": true, "value": 0.0 }
+          ]
+        },
+        "decision": {
+          "id": "decision.anomaly",
+          "mode": "model",
+          "capabilities": ["decision.inspect", "trainable_model.lifecycle", "audit.export"],
+          "inputs": ["transform.feature_window"],
+          "output_schema": {
+            "type": "object",
+            "required": ["anomaly_score"],
+            "properties": { "anomaly_score": { "type": "number" } }
+          },
+          "confidence": 0.5,
+          "explanation": { "trainable": true, "topology": "mlp" },
+          "proposed_intents": [],
+          "authority": "advisory"
+        },
+        "allowed_modules": ["decision.inspect", "trainable_model.lifecycle", "labeling.feedback", "audit.export"],
+        "allowed_intents": ["inspect_decision", "label_event", "replay_candidate", "promote_candidate", "rollback_model"],
+        "state_chart": {
+          "states": ["idle", "evaluating", "shadow", "active", "rolled_back"],
+          "initial": "idle",
+          "current": "active",
+          "transitions": [
+            { "from": "idle", "event": "replay_candidate", "to": "evaluating" },
+            { "from": "evaluating", "event": "start_candidate_shadow", "to": "shadow" },
+            { "from": "shadow", "event": "promote_candidate", "to": "active" },
+            { "from": "active", "event": "rollback_model", "to": "rolled_back" },
+            { "from": "rolled_back", "event": "replay_candidate", "to": "evaluating" }
+          ]
+        },
+        "recent_events": [],
+        "explanation": { "recipe": "scheduled_anomaly" }
+      },
+      {
+        "id": "gate.approval",
+        "family": "gate",
+        "mode": "approval_required",
+        "label": "Approval gate",
+        "ports": [
+          { "id": "score", "name": "Score in", "direction": "in", "dtype": "decision", "required": true },
+          { "id": "release", "name": "Release signal", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "gated", "boundary": "runtime", "owner": "patchboard", "requires_approval": true },
+        "state": {
+          "summary": "Holds the responder action until approved",
+          "fields": [
+            { "id": "gate.held", "state_class": "action", "writable": true, "derived": false, "value": true }
+          ]
+        },
+        "state_chart": {
+          "states": ["open", "held", "released", "rejected"],
+          "initial": "open",
+          "current": "held",
+          "transitions": [
+            { "from": "open", "event": "hold_gate", "to": "held" },
+            { "from": "held", "event": "release_gate", "to": "released" },
+            { "from": "held", "event": "reject_action", "to": "rejected" },
+            { "from": "released", "event": "hold_gate", "to": "held" },
+            { "from": "rejected", "event": "hold_gate", "to": "held" }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "reject_action", "hold_gate", "release_gate"],
+        "recent_events": [],
+        "explanation": { "policy": "explicit approval for external effects" }
+      },
+      {
+        "id": "agent.responder",
+        "family": "decision",
+        "mode": "large_agent",
+        "label": "Responder agent",
+        "ports": [
+          { "id": "context", "name": "Context in", "direction": "in", "dtype": "decision", "required": true },
+          { "id": "intent", "name": "Proposed intent", "direction": "out", "dtype": "decision" }
+        ],
+        "authority": { "default": "advisory", "boundary": "runtime", "owner": "patchboard" },
+        "state": {
+          "summary": "Stronger reasoning loop drafting a remediation plan (advisory)",
+          "fields": [
+            { "id": "agent.run_state", "state_class": "observation", "writable": false, "derived": true, "value": "idle" }
+          ]
+        },
+        "decision": {
+          "id": "decision.responder",
+          "mode": "large_agent",
+          "capabilities": ["agent_lifecycle", "approval.gates"],
+          "inputs": ["source.log_tail", "model.anomaly_mlp"],
+          "output_schema": { "type": "object", "required": ["intent_type"] },
+          "confidence": 0.55,
+          "explanation": { "packet": "draft remediation plan" },
+          "proposed_intents": [
+            {
+              "id": "intent.approve.scan-1",
+              "type": "approve_action",
+              "target": { "kind": "node", "id": "output.notify" },
+              "payload": { "action_id": "scan-1" },
+              "actor": "agent.responder",
+              "authority": "gated",
+              "reason": "Responder drafted an advisory remediation",
+              "created_at": "2026-07-17T00:01:12Z"
+            }
+          ],
+          "authority": "advisory"
+        },
+        "state_chart": {
+          "states": ["idle", "running", "paused", "completed", "failed", "cancelled"],
+          "initial": "idle",
+          "current": "idle",
+          "transitions": [
+            { "from": "idle", "event": "resume_agent_run", "to": "running" },
+            { "from": "running", "event": "pause_agent_run", "to": "paused" },
+            { "from": "paused", "event": "resume_agent_run", "to": "running" },
+            { "from": "running", "event": "cancel_agent_run", "to": "cancelled" },
+            { "from": "running", "event": "approve_action", "to": "completed" },
+            { "from": "running", "event": "reject_action", "to": "failed" }
+          ]
+        },
+        "allowed_modules": ["agent.lifecycle", "approval.gates"],
+        "allowed_intents": ["inspect_agent_run", "pause_agent_run", "resume_agent_run", "approve_action"],
+        "recent_events": [],
+        "explanation": { "advisory": true }
+      },
+      {
+        "id": "output.notify",
+        "family": "output",
+        "mode": "desktop_notify",
+        "label": "Desktop notify",
+        "ports": [
+          { "id": "in", "name": "In", "direction": "in", "dtype": "decision", "required": true }
+        ],
+        "io_binding": {
+          "direction": "egress",
+          "transport": "notify",
+          "format": "text"
+        },
+        "authority": { "default": "gated", "boundary": "runtime", "owner": "patchboard", "requires_approval": true },
+        "state": {
+          "summary": "Surfaces a desktop notification on an approved response (n8n notify-style action)",
+          "fields": [
+            { "id": "notify.sent", "state_class": "action", "writable": false, "derived": true, "value": 0 }
+          ]
+        },
+        "allowed_modules": ["approval.gates"],
+        "allowed_intents": ["approve_action", "hold_gate"],
+        "recent_events": [],
+        "explanation": { "effect": "operator-visible" }
+      }
+    ],
+    "edges": [
+      {
+        "id": "edge.timer.window",
+        "from": "source.timer",
+        "to": "transform.feature_window",
+        "from_port": "tick",
+        "to_port": "tick",
+        "stream_telemetry": { "rate_hz": 0.017, "freshness_ms": 1000, "missing_data": false }
+      },
+      {
+        "id": "edge.log.window",
+        "from": "source.log_tail",
+        "to": "transform.feature_window",
+        "from_port": "record",
+        "to_port": "record",
+        "stream_telemetry": { "rate_hz": 2.0, "freshness_ms": 50, "missing_data": false }
+      },
+      {
+        "id": "edge.window.model",
+        "from": "transform.feature_window",
+        "to": "model.anomaly_mlp",
+        "from_port": "feature",
+        "to_port": "feature",
+        "stream_telemetry": { "rate_hz": 0.5, "latency_ms": 4, "freshness_ms": 80, "missing_data": false }
+      },
+      {
+        "id": "edge.model.gate",
+        "from": "model.anomaly_mlp",
+        "to": "gate.approval",
+        "from_port": "score",
+        "to_port": "score",
+        "stream_telemetry": { "rate_hz": 0.5, "freshness_ms": 120, "missing_data": false }
+      },
+      {
+        "id": "edge.gate.agent",
+        "from": "gate.approval",
+        "to": "agent.responder",
+        "from_port": "release",
+        "to_port": "context",
+        "stream_telemetry": { "rate_hz": 0.02, "freshness_ms": 1000, "missing_data": false }
+      },
+      {
+        "id": "edge.agent.output",
+        "from": "agent.responder",
+        "to": "output.notify",
+        "from_port": "intent",
+        "to_port": "in",
+        "stream_telemetry": { "rate_hz": 0.02, "freshness_ms": 800, "missing_data": false }
+      }
+    ],
+    "timeline": [],
+    "inspectors": [],
+    "intent_modules": [
+      {
+        "id": "trainable_model.lifecycle",
+        "version": "0.1.0",
+        "capability": "trainable_model",
+        "intents": [
+          { "type": "replay_candidate", "authority": "advisory", "target_families": ["decision"], "payload_schema": { "type": "object", "required": ["candidate_id"] } },
+          { "type": "promote_candidate", "authority": "gated", "target_families": ["decision"], "payload_schema": { "type": "object", "required": ["candidate_id"] } }
+        ]
+      },
+      {
+        "id": "approval.gates",
+        "version": "0.1.0",
+        "capability": "approval",
+        "intents": [
+          { "type": "approve_action", "authority": "gated", "target_families": ["gate", "output"], "payload_schema": { "type": "object" } }
+        ]
+      }
+    ],
+    "allowed_intents": ["open_inspector", "inspect_decision", "replay_candidate", "promote_candidate", "approve_action"],
+    "snapshot": {
+      "id": "snapshot.scheduled-anomaly.1",
+      "created_at": "2026-07-17T00:00:00Z",
+      "read_only": true,
+      "delta_cursor": "cursor-scheduled-anomaly-1"
+    }
+  }
+}

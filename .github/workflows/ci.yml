@@ -18,6 +18,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo fmt --check
         working-directory: signal-space-rs
+      - run: cargo clippy --all-targets --features lazily-runtime -- -D warnings
+        working-directory: signal-space-rs
       - run: cargo test
         working-directory: signal-space-rs
       - run: cargo test --features lazily-runtime

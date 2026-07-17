@@ -3,14 +3,15 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 
 /// The latest Signal Space schema version this binding implements.
-pub const SPEC_VERSION: &str = "0.3.0";
+pub const SPEC_VERSION: &str = "0.4.0";
 
 /// Every schema version [`validate_document`] accepts. `0.2.0` documents keep
-/// validating because every `0.3.0` addition (`ports`, `stream_telemetry`,
-/// `io_binding`, and edge `from_port`/`to_port`) is optional.
-pub const SUPPORTED_VERSIONS: &[&str] = &["0.2.0", "0.3.0"];
+/// validating because every later addition (`state_chart`, `ports`,
+/// `stream_telemetry`, `io_binding`, edge `from_port`/`to_port`, and the
+/// `0.4.0` graph-level `category`/`tags`) is optional.
+pub const SUPPORTED_VERSIONS: &[&str] = &["0.2.0", "0.3.0", "0.4.0"];
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthorityLevel {
     Local,
@@ -27,7 +28,7 @@ pub enum StateClass {
     Action,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeFamily {
     Source,
@@ -152,6 +153,13 @@ pub struct SignalGraph {
     pub allowed_intents: Vec<String>,
     pub authority: Authority,
     pub snapshot: Option<serde_json::Value>,
+    /// Optional catalog category for the graph (conventionally
+    /// `"workflow_template"` for an n8n-style template). Added in `0.4.0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Optional free-form tags describing the graph's triggers/actions. `0.4.0`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -414,7 +422,7 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
     }
 
     let mut nodes_by_id: std::collections::HashMap<&str, &SignalNode> =
-        std::collections::HashMap::new();
+        std::collections::HashMap::with_capacity(document.graph.nodes.len());
     for node in &document.graph.nodes {
         if nodes_by_id.insert(node.id.as_str(), node).is_some() {
             return Err(ValidationError::new(format!(
@@ -484,13 +492,15 @@ pub fn validate_document(document: &SignalSpaceDocument) -> Result<(), Validatio
                 )));
             }
         };
-        if !nodes_by_id.contains_key(edge.to_node.as_str()) {
-            return Err(ValidationError::new(format!(
-                "edge has unknown endpoint: {}",
-                edge.id
-            )));
-        }
-        let to_node = nodes_by_id[edge.to_node.as_str()];
+        let to_node = match nodes_by_id.get(edge.to_node.as_str()) {
+            Some(node) => *node,
+            None => {
+                return Err(ValidationError::new(format!(
+                    "edge has unknown endpoint: {}",
+                    edge.id
+                )));
+            }
+        };
         validate_edge_ports(edge, from_node, to_node)?;
     }
 
@@ -679,6 +689,8 @@ pub fn round_trip(
 
 #[cfg(feature = "lazily-runtime")]
 pub mod runtime {
+    use std::rc::Rc;
+
     use lazily::{
         CellHandle, Context, Delta, DeltaOp, EdgeSnapshot, IpcValue, NodeId, NodeSnapshot,
         SignalHandle, Snapshot,
@@ -727,10 +739,15 @@ pub mod runtime {
             let ctx = Context::new();
             let graph_cell = ctx.cell(graph);
             let inspectors_cell = graph_cell;
-            let inspectors =
-                ctx.signal(move |ctx| inspector_summaries(ctx.get_cell(&inspectors_cell)));
+            let inspectors = ctx.signal(move |ctx| {
+                let graph: Rc<SignalGraph> = ctx.get_cell_rc(&inspectors_cell);
+                inspector_summaries(&graph)
+            });
             let mirror_cell = graph_cell;
-            let mirror = ctx.signal(move |ctx| mirror_export(ctx.get_cell(&mirror_cell)));
+            let mirror = ctx.signal(move |ctx| {
+                let graph: Rc<SignalGraph> = ctx.get_cell_rc(&mirror_cell);
+                mirror_export(&graph)
+            });
             Self {
                 ctx,
                 graph: graph_cell,
@@ -762,20 +779,40 @@ pub mod runtime {
         }
     }
 
-    pub fn inspector_summaries(graph: SignalGraph) -> Vec<InspectorSummary> {
+    pub fn inspector_summaries(graph: &SignalGraph) -> Vec<InspectorSummary> {
         graph.nodes.iter().map(inspector_summary).collect()
     }
 
     pub fn inspector_summary(node: &SignalNode) -> InspectorSummary {
         InspectorSummary {
             node_id: node.id.clone(),
-            family: format!("{:?}", node.family).to_ascii_lowercase(),
+            family: family_as_str(node.family).to_string(),
             state_summary: node.state.summary.clone(),
-            authority: format!("{:?}", node.authority.default).to_ascii_lowercase(),
+            authority: authority_level_as_str(node.authority.default).to_string(),
             allowed_intents: node.allowed_intents.clone(),
             writable_fields: fields_by_kind(&node.state.fields, true),
             derived_fields: fields_by_kind(&node.state.fields, false),
             recent_event_count: node.recent_events.len(),
+        }
+    }
+
+    fn family_as_str(family: crate::NodeFamily) -> &'static str {
+        match family {
+            crate::NodeFamily::Source => "source",
+            crate::NodeFamily::Transform => "transform",
+            crate::NodeFamily::Memory => "memory",
+            crate::NodeFamily::Decision => "decision",
+            crate::NodeFamily::Gate => "gate",
+            crate::NodeFamily::Output => "output",
+        }
+    }
+
+    fn authority_level_as_str(level: crate::AuthorityLevel) -> &'static str {
+        match level {
+            crate::AuthorityLevel::Local => "local",
+            crate::AuthorityLevel::Advisory => "advisory",
+            crate::AuthorityLevel::Gated => "gated",
+            crate::AuthorityLevel::Direct => "direct",
         }
     }
 
@@ -793,17 +830,23 @@ pub mod runtime {
             .collect()
     }
 
-    pub fn mirror_export(graph: SignalGraph) -> MirrorExport {
-        let snapshot = snapshot_for_graph(&graph);
-        let delta = Delta::next(0, delta_ops_for_graph(&graph));
+    pub fn mirror_export(graph: &SignalGraph) -> MirrorExport {
+        let snapshot = snapshot_for_graph(graph);
+        let delta = Delta::next(0, delta_ops_for_graph(graph));
         MirrorExport { snapshot, delta }
     }
 
     pub fn snapshot_for_graph(graph: &SignalGraph) -> Snapshot {
-        let mut nodes = Vec::new();
+        let total = 1 + graph.nodes.len() + graph.timeline.len();
+        let mut nodes = Vec::with_capacity(total);
         nodes.push(node_payload(1, "signal-space.graph", graph));
+
+        let mut wire_ids: std::collections::HashMap<&str, u64> =
+            std::collections::HashMap::with_capacity(graph.nodes.len());
         for (idx, node) in graph.nodes.iter().enumerate() {
-            nodes.push(node_payload(node_wire_id(idx), "signal-space.node", node));
+            let wire_id = node_wire_id(idx);
+            wire_ids.insert(node.id.as_str(), wire_id);
+            nodes.push(node_payload(wire_id, "signal-space.node", node));
         }
         for (idx, event) in graph.timeline.iter().enumerate() {
             nodes.push(node_payload(
@@ -817,16 +860,8 @@ pub mod runtime {
             .edges
             .iter()
             .filter_map(|edge| {
-                let dependent = graph
-                    .nodes
-                    .iter()
-                    .position(|node| node.id == edge.to_node)
-                    .map(node_wire_id)?;
-                let dependency = graph
-                    .nodes
-                    .iter()
-                    .position(|node| node.id == edge.from_node)
-                    .map(node_wire_id)?;
+                let dependent = wire_ids.get(edge.to_node.as_str()).copied()?;
+                let dependency = wire_ids.get(edge.from_node.as_str()).copied()?;
                 Some(EdgeSnapshot::new(NodeId(dependent), NodeId(dependency)))
             })
             .collect();
@@ -835,7 +870,8 @@ pub mod runtime {
     }
 
     pub fn delta_ops_for_graph(graph: &SignalGraph) -> Vec<DeltaOp> {
-        let mut ops = Vec::new();
+        let total = 1 + graph.nodes.len() + graph.timeline.len();
+        let mut ops = Vec::with_capacity(total);
         ops.push(DeltaOp::SlotValue {
             node: NodeId(1),
             payload: to_ipc_value(graph),
