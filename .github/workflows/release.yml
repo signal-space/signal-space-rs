@@ -15,4 +15,6 @@ jobs:
           repository: signal-space/signal-space-spec
           path: signal-space-spec
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo publish --token ${CARGO_REGISTRY_TOKEN}
+      - run: cargo publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
