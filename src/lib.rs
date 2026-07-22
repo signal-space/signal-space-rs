@@ -692,8 +692,8 @@ pub mod runtime {
     use std::rc::Rc;
 
     use lazily::{
-        CellHandle, Context, Delta, DeltaOp, EdgeSnapshot, IpcValue, NodeId, NodeSnapshot,
-        SignalHandle, Snapshot,
+        Computed, Context, Delta, DeltaOp, EdgeSnapshot, IpcValue, NodeId, NodeSnapshot, Snapshot,
+        Source,
     };
 
     use crate::{
@@ -703,7 +703,7 @@ pub mod runtime {
     /// Summary row for an inspector panel derived from graph state.
     ///
     /// This is intentionally derived-only. Mutating node state must go through
-    /// the graph cell and then the owning adapter's authority boundary.
+    /// the graph source and then the owning adapter's authority boundary.
     #[derive(Debug, Clone, PartialEq, Eq)]
     pub struct InspectorSummary {
         pub node_id: String,
@@ -725,39 +725,39 @@ pub mod runtime {
 
     /// Lazily-backed local runtime for a Signal Space graph.
     ///
-    /// The graph itself is the only writable cell. Inspector summaries and
-    /// mirror exports are eager signals derived from that cell.
+    /// The graph itself is the only writable source. Inspector summaries and
+    /// mirror exports are eager signals derived from that source.
     pub struct SignalSpaceRuntime {
         ctx: Context,
-        graph: CellHandle<SignalGraph>,
-        inspectors: SignalHandle<Vec<InspectorSummary>>,
-        mirror: SignalHandle<MirrorExport>,
+        graph: Source<SignalGraph>,
+        inspectors: Computed<Vec<InspectorSummary>>,
+        mirror: Computed<MirrorExport>,
     }
 
     impl SignalSpaceRuntime {
         pub fn new(graph: SignalGraph) -> Self {
             let ctx = Context::new();
-            let graph_cell = ctx.cell(graph);
-            let inspectors_cell = graph_cell;
+            let graph_source = ctx.source(graph);
+            let inspectors_source = graph_source;
             let inspectors = ctx.signal(move |ctx| {
-                let graph: Rc<SignalGraph> = ctx.get_cell_rc(&inspectors_cell);
+                let graph: Rc<SignalGraph> = ctx.get_rc(&inspectors_source);
                 inspector_summaries(&graph)
             });
-            let mirror_cell = graph_cell;
+            let mirror_source = graph_source;
             let mirror = ctx.signal(move |ctx| {
-                let graph: Rc<SignalGraph> = ctx.get_cell_rc(&mirror_cell);
+                let graph: Rc<SignalGraph> = ctx.get_rc(&mirror_source);
                 mirror_export(&graph)
             });
             Self {
                 ctx,
-                graph: graph_cell,
+                graph: graph_source,
                 inspectors,
                 mirror,
             }
         }
 
         pub fn graph(&self) -> SignalGraph {
-            self.ctx.get_cell(&self.graph)
+            self.ctx.get(&self.graph)
         }
 
         pub fn set_graph(&self, graph: SignalGraph) {

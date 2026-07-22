@@ -15,7 +15,7 @@ parse and validate.
 
 ## Runtime Feature
 
-Enable `lazily-runtime` to represent a `SignalGraph` as a lazily writable cell
+Enable `lazily-runtime` to represent a `SignalGraph` as a lazily writable source
 with derived inspector summaries and read-only Snapshot/Delta mirror exports:
 
 ```bash
